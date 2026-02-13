@@ -38,7 +38,6 @@ module mc6809(
     input   nDMABREQ
     
     , output  [111:0] RegData
-
     );
 
 reg [1:0] clk_phase=2'b00;
@@ -49,15 +48,15 @@ assign CLK=EXTAL;
 wire   LIC;
 wire   BUSY;
 wire   AVMA;
-reg    rE;
-reg    rQ;
+reg    rE = 0;
+reg    rQ = 0;
 assign E = rE;
 assign Q = rQ;
 
-mc6809i cpucore(.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .E(E), .Q(Q), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ), 
-                .nNMI(nNMI), .AVMA(AVMA), .BUSY(BUSY), .LIC(LIC), .nHALT(nHALT), .nRESET(nRESET), .nDMABREQ(nDMABREQ)
-                ,.RegData(RegData)
-                );
+// MRDY routed into core for sync memory; E/Q stretch in this shim is for observability only.
+mc6809i cpucore(.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .E(E), .Q(Q), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ),
+                .nNMI(nNMI), .AVMA(AVMA), .BUSY(BUSY), .LIC(LIC), .nHALT(nHALT), .nRESET(nRESET), .nDMABREQ(nDMABREQ),
+                .MRDY(MRDY), .RegData(RegData));
 
 always @(negedge CLK)
 begin
@@ -71,7 +70,6 @@ begin
         2'b11:
             rQ <= 0;
     endcase
-    
     if (MRDY == 1'b1) 
         clk_phase <= clk_phase + 2'b01;
 end

@@ -49,8 +49,9 @@ module mc6809s(
     assign  Q = rQ;
     reg     nCoreRESET;
     
+ // MRDY tied high (no wait states in this shim).
  mc6809i corecpu(.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .E(rE), .Q(rQ), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ), .nNMI(nNMI), .AVMA(AVMA), .BUSY(BUSY), .LIC(LIC), .nRESET(nCoreRESET),
-                 .nDMABREQ(nDMABREQ), .nHALT(nHALT), .RegData(RegData) );
+                 .nDMABREQ(nDMABREQ), .nHALT(nHALT), .MRDY(1'b1), .RegData(RegData));
                  
  always @(posedge CLK4)
  begin

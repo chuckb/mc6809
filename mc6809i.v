@@ -40,7 +40,8 @@
 
 module mc6809i
 #(
-    parameter ILLEGAL_INSTRUCTIONS="GHOST"
+    parameter ILLEGAL_INSTRUCTIONS="GHOST",
+    parameter SYNC_MEM = 1
 ) 
 (
 
@@ -61,6 +62,7 @@ module mc6809i
     input   nHALT,
     input   nRESET,
     input   nDMABREQ,
+    input   MRDY,
     output  [111:0] RegData
 );
 
@@ -130,8 +132,6 @@ assign  RegData[79:64] = u;
 assign  RegData[87:80] = cc;
 assign  RegData[95:88] = dp;
 assign  RegData[111:96] = pc;
-
-
 
 // The values as being calculated
 reg     [7:0]           a_nxt;
@@ -223,6 +223,12 @@ localparam INTTYPE_SWI3     = 3'H5 ;
 
 reg [2:0] IntType;
 reg [2:0] IntType_nxt;
+
+// READ_ISSUE/READ_USE added to support synchronous (registered-read) memory; MRDY stalls
+// READ_USE completion. When SYNC_MEM=1, reads are two-phase: issue address one cycle,
+// consume D the next (or when MRDY=1). Prevents same-cycle consumption of D.
+reg rd_pending = 1'b0;
+reg rd_pending_nxt;
 
 //////////////////////////////////////////////////////
 // Instruction Fetch Details
@@ -372,6 +378,18 @@ localparam CPUSTATE_SYNC_EXIT           =  7'd114;
 
 localparam CPUSTATE_INT_DONTCARE        =  7'd115;
 
+// READ_USE states: consume D one cycle after READ_ISSUE; MRDY gates completion (SYNC_MEM only).
+localparam CPUSTATE_RESET0_READ_USE     =  7'd116;
+localparam CPUSTATE_RESET2_READ_USE     =  7'd117;
+localparam CPUSTATE_FETCH_I1_READ_USE   =  7'd118;
+localparam CPUSTATE_FETCH_I1V2_READ_USE =  7'd119;
+localparam CPUSTATE_IRQ_VECTOR_HI_READ_USE  = 7'd120;
+localparam CPUSTATE_IRQ_VECTOR_LO_READ_USE  = 7'd121;
+localparam CPUSTATE_RTS_HI_READ_USE    =  7'd122;
+localparam CPUSTATE_RTS_LO_READ_USE    =  7'd123;
+localparam CPUSTATE_PUL_ACTION_READ_USE =  7'd124;
+localparam CPUSTATE_16IMM_LO_READ_USE  =  7'd125;
+localparam CPUSTATE_FETCH_I2_READ_USE  =  7'd126;
 
 reg     [6:0]    CpuState = CPUSTATE_RESET;
 reg     [6:0]    CpuState_nxt = CPUSTATE_RESET;
@@ -597,19 +615,23 @@ begin
     DMABREQSample2 <= DMABREQSample;
     DMABREQLatched <= DMABREQSample2;
 
-
     if (rnRESET == 1)
     begin
-        CpuState <= CpuState_nxt;
-        
-        // Don't interpret this next item as "The Next State"; it's a special case 'after this 
-        // generic state, go to this programmable state', so that a single state 
-        // can be shared for many tasks. [Specifically, the stack push/pull code, which is used
-        // for PSH, PUL, Interrupts, RTI, etc.
-        NextState <= NextState_nxt;
-         
-        // CPU registers latch from the combinatorial circuit
-        a <= a_nxt;
+        rd_pending <= rd_pending_nxt;
+        // When SYNC_MEM and waiting for MRDY, do not advance state or consume data.
+        // When SYNC_MEM and waiting for MRDY, do not advance state or consume data.
+        if (!(SYNC_MEM && rd_pending && (MRDY == 1'b0)))
+        begin
+            CpuState <= CpuState_nxt;
+            
+            // Don't interpret this next item as "The Next State"; it's a special case 'after this 
+            // generic state, go to this programmable state', so that a single state 
+            // can be shared for many tasks. [Specifically, the stack push/pull code, which is used
+            // for PSH, PUL, Interrupts, RTI, etc.
+            NextState <= NextState_nxt;
+             
+            // CPU registers latch from the combinatorial circuit
+            a <= a_nxt;
         b <= b_nxt;
         x <= x_nxt;
         y <= y_nxt;
@@ -633,10 +655,12 @@ begin
         
         if (s != s_nxt)                 // Once S changes at all (default is '0'), release the NMI Mask.
             NMIMask <= 1'b0;
+        end
     end
     else
     begin
-        CpuState <= CPUSTATE_RESET; 
+        CpuState <= CPUSTATE_RESET;
+        rd_pending <= 1'b0;
         NMIMask <= 1'b1; // Mask NMI until S is loaded.
         NMIClear <= 1'b0; // Mark us as not having serviced NMI
     end
@@ -1711,6 +1735,8 @@ begin
     InstPage2_nxt  =  InstPage2;
     InstPage3_nxt  =  InstPage3;
     
+    rd_pending_nxt =  1'b0;
+    
     CpuState_nxt   =  CpuState;
     
     case (CpuState)
@@ -1738,22 +1764,81 @@ begin
     CPUSTATE_RESET0:
     begin
         addr_nxt       =  `RESET_VECTOR;
+        RnWOut         =  1'b1;
         rBUSY          =  1'b1;
-        pc_nxt[15:8]   =  D[7:0];
         BS_nxt         =  1'b1; // ACK RESET
-        rAVMA = 1'b1;
-        rLIC = 1'b1;
-        CpuState_nxt   =  CPUSTATE_RESET2;
+        rAVMA          =  1'b1;
+        rLIC           =  1'b1;
+        if (SYNC_MEM)
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   =  CPUSTATE_RESET0_READ_USE;
+        end
+        else
+        begin
+            pc_nxt[15:8]   =  D[7:0];
+            CpuState_nxt   =  CPUSTATE_RESET2;
+        end
+    end
+
+    CPUSTATE_RESET0_READ_USE:
+    begin
+        addr_nxt = addr;
+        RnWOut   = 1'b1;
+        BS_nxt   = 1'b1;
+        rAVMA    = 1'b1;
+        rLIC     = 1'b1;
+        rBUSY    = 1'b1;
+        if (MRDY)
+        begin
+            pc_nxt[15:8]   = D[7:0];
+            rd_pending_nxt = 1'b0;
+            CpuState_nxt   = CPUSTATE_RESET2;
+        end
+        else
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_RESET0_READ_USE;
+        end
     end
     
     CPUSTATE_RESET2:
     begin
         addr_nxt       =  addr_p1;
-        BS_nxt         =  1'b1; // ACK RESET        
-        pc_nxt[7:0]    =  D[7:0];
-        rAVMA = 1'b1;
-        rLIC = 1'b1;
-        CpuState_nxt   =  CPUSTATE_FETCH_I1;
+        RnWOut         =  1'b1;
+        BS_nxt         =  1'b1; // ACK RESET
+        rAVMA          =  1'b1;
+        rLIC           =  1'b1;
+        if (SYNC_MEM)
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   =  CPUSTATE_RESET2_READ_USE;
+        end
+        else
+        begin
+            pc_nxt[7:0]    =  D[7:0];
+            CpuState_nxt   =  CPUSTATE_FETCH_I1;
+        end
+    end
+
+    CPUSTATE_RESET2_READ_USE:
+    begin
+        addr_nxt = addr;
+        RnWOut   = 1'b1;
+        BS_nxt   = 1'b1;
+        rAVMA    = 1'b1;
+        rLIC     = 1'b1;
+        if (MRDY)
+        begin
+            pc_nxt[7:0]    = D[7:0];
+            rd_pending_nxt = 1'b0;
+            CpuState_nxt   = CPUSTATE_FETCH_I1;
+        end
+        else
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_RESET2_READ_USE;
+        end
     end
     
     CPUSTATE_FETCH_I1:
@@ -1776,48 +1861,150 @@ begin
             rAVMA          = 1'b0;
             BS_nxt         = 1'b1;
             BA_nxt         = 1'b1;
-            rLIC           = 1'b1;            
+            rLIC           = 1'b1;
             CpuState_nxt = CPUSTATE_HALTED;
         end
-        else // not halting, run the inst byte fetch
+        else if (SYNC_MEM)
         begin
-            addr_nxt       =  pc;   // Set the address bus for the next instruction, first byte
-            pc_nxt =  pc_p1;
-            RnWOut =  1;            // Set for a READ
-            Inst1_nxt  =  MappedInstruction;
+            // READ_ISSUE: assert address for inst fetch; consume D in READ_USE (next cycle).
+            // Do not advance PC here; FETCH_I1_READ_USE advances after consuming the byte.
+            addr_nxt       = pc;
+            pc_nxt         = pc;
+            RnWOut         = 1'b1;
+            InstPage2_nxt  = 0;
+            InstPage3_nxt  = 0;
+            rAVMA          = 1'b1;
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_FETCH_I1_READ_USE;
+        end
+        else
+        begin
+            addr_nxt       =  pc;
+            pc_nxt         =  pc_p1;
+            RnWOut         =  1;
+            Inst1_nxt      =  MappedInstruction;
             InstPage2_nxt  =  0;
             InstPage3_nxt  =  0;
-            
-            // New instruction fetch; service interrupts pending
             if (NMILatched == 0)
             begin
-                pc_nxt = pc;        
+                pc_nxt = pc;
                 rAVMA = 1'b1;
                 CpuState_nxt = CPUSTATE_NMI_START;
             end
-            else if ((FIRQLatched == 0) && (cc[CC_F_BIT] == 0))
+            else if ((FIRQSample == 0) && (cc[CC_F_BIT] == 0))
             begin
                 pc_nxt = pc;
                 rAVMA = 1'b1;
                 CpuState_nxt = CPUSTATE_FIRQ_START;
             end
-            else if ((IRQLatched == 0) && (cc[CC_I_BIT] == 0))
+            else if ((IRQSample == 0) && (cc[CC_I_BIT] == 0))
             begin
-                pc_nxt = pc; 
-                rAVMA = 1'b1;                
+                pc_nxt = pc;
+                rAVMA = 1'b1;
                 CpuState_nxt = CPUSTATE_IRQ_START;
             end
-            
-            // The actual 1st byte checks
-            else if (Inst1_nxt == 8'H10) // Page 2  Note, like the 6809, $10 $10 $10 $10 has the same effect as a single $10.
+            else if (Inst1_nxt == 8'H10)
             begin
-                InstPage2_nxt  =  1;
+                InstPage2_nxt = 1;
+                rAVMA = 1'b1;
+                CpuState_nxt  = CPUSTATE_FETCH_I1V2;
+            end
+            else if (Inst1_nxt == 8'H11)
+            begin
+                InstPage3_nxt = 1;
+                rAVMA = 1'b1;
+                CpuState_nxt  = CPUSTATE_FETCH_I1V2;
+            end
+            else
+            begin
+                rAVMA = 1'b1;
+                CpuState_nxt  = CPUSTATE_FETCH_I2;
+            end
+        end
+    end
+
+    CPUSTATE_FETCH_I1_READ_USE:
+    begin
+        addr_nxt   = addr;
+        RnWOut     = 1'b1;
+        pc_nxt     = pc_p1;
+        InstPage2_nxt = InstPage2;
+        InstPage3_nxt = InstPage3;
+        if (MRDY)
+        begin
+            Inst1_nxt     = MappedInstruction;
+            rd_pending_nxt = 1'b0;
+            if (NMILatched == 0)
+            begin
+                pc_nxt = pc;
+                rAVMA = 1'b1;
+                CpuState_nxt = CPUSTATE_NMI_START;
+            end
+            else if ((FIRQSample == 0) && (cc[CC_F_BIT] == 0))
+            begin
+                pc_nxt = pc;
+                rAVMA = 1'b1;
+                CpuState_nxt = CPUSTATE_FIRQ_START;
+            end
+            else if ((IRQSample == 0) && (cc[CC_I_BIT] == 0))
+            begin
+                pc_nxt = pc;
+                rAVMA = 1'b1;
+                CpuState_nxt = CPUSTATE_IRQ_START;
+            end
+            else if (MappedInstruction == 8'H10)
+            begin
+                InstPage2_nxt = 1;
+                rAVMA = 1'b1;
+                CpuState_nxt  = CPUSTATE_FETCH_I1V2;
+            end
+            else if (MappedInstruction == 8'H11)
+            begin
+                InstPage3_nxt = 1;
+                rAVMA = 1'b1;
+                CpuState_nxt  = CPUSTATE_FETCH_I1V2;
+            end
+            else
+            begin
+                rAVMA = 1'b1;
+                CpuState_nxt  = CPUSTATE_FETCH_I2;
+            end
+        end
+        else
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_FETCH_I1_READ_USE;
+        end
+    end
+    
+    CPUSTATE_FETCH_I1V2:
+    begin
+        if (SYNC_MEM)
+        begin
+            addr_nxt   = pc;
+            pc_nxt     = pc;   // advance only in FETCH_I1V2_READ_USE after consuming byte
+            RnWOut     = 1'b1;
+            rAVMA      = 1'b1;
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_FETCH_I1V2_READ_USE;
+        end
+        else
+        begin
+            addr_nxt   =  pc;
+            pc_nxt     =  pc_p1;
+            RnWOut     =  1;
+            Inst1_nxt  =  MappedInstruction;
+            if (Inst1_nxt == 8'H10)
+            begin
+                if (InstPage3 == 0)
+                    InstPage2_nxt  =  1;
                 rAVMA = 1'b1;
                 CpuState_nxt   =  CPUSTATE_FETCH_I1V2;
             end
-            else if (Inst1_nxt == 8'H11)    // Page 3
+            else if (Inst1_nxt == 8'H11)
             begin
-                InstPage3_nxt  =  1;
+                if (InstPage2 == 0)
+                    InstPage3_nxt  =  1;
                 rAVMA = 1'b1;
                 CpuState_nxt   =  CPUSTATE_FETCH_I1V2;
             end
@@ -1826,47 +2013,67 @@ begin
                 rAVMA = 1'b1;
                 CpuState_nxt   =  CPUSTATE_FETCH_I2;
             end
-        end // if not halting
-    end
-    
-    CPUSTATE_FETCH_I1V2:
-    begin
-        addr_nxt   =  pc;            // Set the address bus for the next instruction, first byte
-        pc_nxt     =  pc_p1;
-        RnWOut     =  1;            // Set for a READ
-        Inst1_nxt  =  MappedInstruction;
-
-        if (Inst1_nxt == 8'H10)         // Page 2  Note, like the 6809, $10 $10 $10 $10 has the same effect as a single $10.
-        begin
-            if (InstPage3 == 0)             // $11 $11 $11 $11 ... $11 $10 still = Page 3
-                InstPage2_nxt  =  1;
-            rAVMA = 1'b1;
-            CpuState_nxt   =  CPUSTATE_FETCH_I1V2;
         end
-        else if (Inst1_nxt == 8'H11)    // Page 3
+    end
+
+    CPUSTATE_FETCH_I1V2_READ_USE:
+    begin
+        addr_nxt   = addr;
+        RnWOut     = 1'b1;
+        pc_nxt     = pc_p1;
+        if (MRDY)
         begin
-            if (InstPage2 == 0)             // $10 $10 ... $10 $11 still = Page 2
-                InstPage3_nxt  =  1;
-            rAVMA = 1'b1;
-            CpuState_nxt   =  CPUSTATE_FETCH_I1V2;
+            Inst1_nxt     = MappedInstruction;
+            rd_pending_nxt = 1'b0;
+            if (MappedInstruction == 8'H10)
+            begin
+                if (InstPage3 == 0)
+                    InstPage2_nxt = 1;
+                rAVMA = 1'b1;
+                CpuState_nxt = CPUSTATE_FETCH_I1V2;
+            end
+            else if (MappedInstruction == 8'H11)
+            begin
+                if (InstPage2 == 0)
+                    InstPage3_nxt = 1;
+                rAVMA = 1'b1;
+                CpuState_nxt = CPUSTATE_FETCH_I1V2;
+            end
+            else
+            begin
+                rAVMA = 1'b1;
+                CpuState_nxt = CPUSTATE_FETCH_I2;
+            end
         end
         else
         begin
-            rAVMA = 1'b1;
-            CpuState_nxt   =  CPUSTATE_FETCH_I2;
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_FETCH_I1V2_READ_USE;
         end
     end
     
     
     CPUSTATE_FETCH_I2:      // We've fetched the first byte.  If a $10 or $11 (page select), mark those flags and fetch the next byte as instruction byte 1.
     begin
-        addr_nxt   =  addr_p1;    // Address bus++
-        pc_nxt     =  pc_p1;
-        Inst2_nxt  =  D[7:0];
-        rAVMA = 1'b1;
-        CpuState_nxt   =  CPUSTATE_FETCH_I1;
+        RnWOut     =  1'b1;
+        rAVMA      =  1'b1;
+        if (SYNC_MEM)
+        begin
+            if ((Inst1 == 8'H1C) || (Inst1 == 8'H1A))
+                addr_nxt = pc;   // ANDCC/ORCC: second byte at pc (already advanced in FETCH_I1_READ_USE)
+            else
+                addr_nxt   =  addr_p1;   // Advance to second byte; READ_USE will consume it
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_FETCH_I2_READ_USE;
+        end
+        else
+        begin
+            addr_nxt   =  addr_p1;    // Address bus++
+            pc_nxt     =  pc_p1;
+            Inst2_nxt  =  D[7:0];
+            CpuState_nxt   =  CPUSTATE_FETCH_I1;
 
-        if (IsIllegalInstruction)           // Skip illegal instructions
+            if (IsIllegalInstruction)           // Skip illegal instructions
         begin
             
             rAVMA = 1'b1;
@@ -2015,14 +2222,14 @@ begin
                         if (Inst1 == OPCODE_IMM_ANDCC)
                         begin
                             pc_nxt = pc_p1;
-                            cc_nxt = cc & D; //cc_nxt & Inst2_nxt;
+                            cc_nxt = cc & Inst2_nxt;
                             rAVMA = 1'b1;
                             CpuState_nxt = CPUSTATE_CC_DONTCARE;
                         end
                         else if (Inst1 == OPCODE_IMM_ORCC)
                         begin
                             pc_nxt = pc_p1;
-                            cc_nxt = cc | D; //cc_nxt | Inst2_nxt;
+                            cc_nxt = cc | Inst2_nxt;
                             rAVMA = 1'b1;
                             CpuState_nxt = CPUSTATE_CC_DONTCARE;
                         end
@@ -2215,7 +2422,335 @@ begin
             endcase
         end
     end
+    end  // else !SYNC_MEM
     
+    CPUSTATE_FETCH_I2_READ_USE:
+    begin
+        addr_nxt   = addr;
+        RnWOut     = 1'b1;
+        if (MRDY)
+        begin
+            Inst2_nxt  = D[7:0];
+            // For 16-bit immediate (e.g. LDD #imm), keep PC at 2nd byte so 16IMM_LO reads 3rd via pc_p1
+            if (AddrModeType == TYPE_IMMEDIATE && IsALU16Opcode)
+                pc_nxt = pc;
+            else
+                pc_nxt = pc_p1;
+            rd_pending_nxt = 1'b0;
+            rAVMA = 1'b1;
+            CpuState_nxt   = CPUSTATE_FETCH_I1;
+
+            if (IsIllegalInstruction)
+            begin
+                rAVMA = 1'b1;
+                CpuState_nxt = IllegalInstructionState;
+                rLIC = 1'b1;
+            end
+            else
+            begin
+                case (AddrModeType)
+                TYPE_INDEXED:
+                begin
+                    rAVMA = 1'b1;
+                    CpuState_nxt   =  CPUSTATE_INDEXED_BASE;
+                end
+                TYPE_EXTENDED:
+                begin
+                    ea_nxt[15:8]   =  Inst2_nxt;
+                    rAVMA = 1'b1;
+                    CpuState_nxt   =  CPUSTATE_EXTENDED_ADDRLO;
+                end
+                TYPE_DIRECT:
+                begin
+                    ea_nxt =  {dp, Inst2_nxt};
+                    rAVMA = 1'b0;
+                    CpuState_nxt   =  CPUSTATE_DIRECT_DONTCARE;
+                end
+                TYPE_INHERENT:
+                begin
+                    if (Inst1 == OPCODE_INH_NOP)
+                    begin
+                        rLIC = 1'b1;
+                        rAVMA = 1'b1;
+                        CpuState_nxt = CPUSTATE_FETCH_I1;
+                    end
+                    else if (Inst1 == OPCODE_INH_DAA)
+                    begin
+                        if ( ((cc[CC_C_BIT]) || (a[7:4] > 4'H9)) ||
+                             ((a[7:4] > 4'H8) && (a[3:0] > 4'H9)) )
+                            tmp_nxt[7:4] = 4'H6;
+                        else
+                            tmp_nxt[7:4] = 4'H0;
+                        if ((cc[CC_H_BIT]) || (a[3:0] > 4'H9))
+                            tmp_nxt[3:0] = 4'H6;
+                        else
+                            tmp_nxt[3:0] = 4'H0;
+                        {tmp_nxt[8], a_nxt} = {1'b0, a} + tmp_nxt[7:0];
+                        cc_nxt[CC_C_BIT] = cc_nxt[CC_C_BIT] | tmp_nxt[8];
+                        cc_nxt[CC_N_BIT] = a_nxt[7];
+                        cc_nxt[CC_Z_BIT] = (a_nxt == 8'H00);
+                        rLIC = 1'b1;
+                        rAVMA = 1'b1;
+                        CpuState_nxt = CPUSTATE_FETCH_I1;
+                    end
+                    else if (Inst1 == OPCODE_INH_SYNC)
+                    begin
+                        CpuState_nxt = CPUSTATE_SYNC;
+                        rLIC = 1'b1;
+                        rAVMA = 1'b0;
+                    end
+                    else if (Inst1 == OPCODE_INH_MUL)
+                    begin
+                        tmp_nxt = 16'H0000;
+                        ea_nxt[15:8] = 8'H00;
+                        ea_nxt[7:0] = a;
+                        a_nxt = 8;
+                        rAVMA = 1'b0;
+                        CpuState_nxt = CPUSTATE_MUL_ACTION;
+                    end
+                    else if (Inst1 == OPCODE_INH_RTS)
+                    begin
+                        rAVMA = 1'b1;
+                        CpuState_nxt   =  CPUSTATE_RTS_HI;
+                    end
+                    else if (Inst1 == OPCODE_INH_RTI)
+                    begin
+                        rAVMA = 1'b1;
+                        tmp_nxt = 16'H1001;
+                        CpuState_nxt = CPUSTATE_PUL_ACTION;
+                        NextState_nxt = CPUSTATE_FETCH_I1;
+                    end
+                    else if (Inst1 == OPCODE_INH_SWI)
+                    begin
+                        rAVMA = 1'b1;
+                        CpuState_nxt = CPUSTATE_SWI_START;
+                    end
+                    else if (Inst1 == OPCODE_INH_CWAI)
+                    begin
+                        rAVMA = 1'b1;
+                        CpuState_nxt = CPUSTATE_CWAI;
+                    end
+                    else if (Inst1 == OPCODE_INH_SEX)
+                    begin
+                        a_nxt = {8{b[7]}};
+                        rLIC = 1'b1;
+                        rAVMA = 1'b1;
+                        CpuState_nxt = CPUSTATE_FETCH_I1;
+                    end
+                    else if (Inst1 == OPCODE_INH_ABX)
+                    begin
+                        x_nxt  =  x + b;
+                        rAVMA = 1'b0;
+                        CpuState_nxt   =  CPUSTATE_ABX_DONTCARE;
+                    end
+                    else
+                    begin
+                        ALU_OP =  ALU8Op;
+                        if (IsTargetRegA)
+                            ALU_A  =  a;
+                        else
+                            ALU_A  =  b;
+                        ALU_B  =  0;
+                        ALU_CC =  cc;
+                        cc_nxt =  ALU[15:8];
+                        if (ALU8Writeback)
+                        begin
+                            if (IsTargetRegA)
+                                a_nxt  =  ALU[7:0];
+                            else
+                                b_nxt  =  ALU[7:0];
+                        end
+                        rLIC = 1'b1;
+                        rAVMA = 1'b1;
+                        CpuState_nxt = CPUSTATE_FETCH_I1;
+                    end
+                    if (IsOneByteInstruction(Inst1))
+                        pc_nxt =  pc;
+                end
+                TYPE_IMMEDIATE:
+                begin
+                    if (IsSpecialImmediate)
+                    begin
+                        if (Inst1 == OPCODE_IMM_ANDCC)
+                        begin
+                            pc_nxt = pc_p1;
+                            cc_nxt = cc & D[7:0];
+                            rAVMA = 1'b1;
+                            CpuState_nxt = CPUSTATE_CC_DONTCARE;
+                        end
+                        else if (Inst1 == OPCODE_IMM_ORCC)
+                        begin
+                            pc_nxt = pc_p1;
+                            cc_nxt = cc | D[7:0];
+                            rAVMA = 1'b1;
+                            CpuState_nxt = CPUSTATE_CC_DONTCARE;
+                        end
+                        else if ( (Inst1 == OPCODE_IMM_PSHS) | (Inst1 == OPCODE_IMM_PSHU) )
+                        begin
+                            pc_nxt = pc_p1;
+                            tmp_nxt[15] = 1'b0;
+                            tmp_nxt[14] = Inst1[1];
+                            tmp_nxt[13] = 1'b0;
+                            tmp_nxt[13:8] = 6'H00;
+                            tmp_nxt[7:0] = Inst2_nxt;
+                            rAVMA = 1'b0;
+                            CpuState_nxt = CPUSTATE_PSH_DONTCARE1;
+                            NextState_nxt = CPUSTATE_FETCH_I1;
+                        end
+                        else if ( (Inst1 == OPCODE_IMM_PULS) | (Inst1 == OPCODE_IMM_PULU) )
+                        begin
+                            pc_nxt = pc_p1;
+                            tmp_nxt[15] = 1'b0;
+                            tmp_nxt[14] = Inst1[1];
+                            tmp_nxt[13:8] = 6'H00;
+                            tmp_nxt[7:0] = Inst2_nxt;
+                            rAVMA = 1'b0;
+                            CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+                            NextState_nxt = CPUSTATE_FETCH_I1;
+                        end
+                        else if (Inst1 == OPCODE_IMM_TFR)
+                        begin
+                            case (Inst2_nxt[3:0])
+                                EXGTFR_REG_D:
+                                    {a_nxt,b_nxt}  =  EXGTFRRegA;
+                                EXGTFR_REG_X:
+                                    x_nxt  =  EXGTFRRegA;
+                                EXGTFR_REG_Y:
+                                    y_nxt  =  EXGTFRRegA;
+                                EXGTFR_REG_U:
+                                    u_nxt  =  EXGTFRRegA;
+                                EXGTFR_REG_S:
+                                    s_nxt  =  EXGTFRRegA;
+                                EXGTFR_REG_PC:
+                                    pc_nxt =  EXGTFRRegA;
+                                EXGTFR_REG_DP:
+                                    dp_nxt =  EXGTFRRegA[7:0];
+                                EXGTFR_REG_A:
+                                    a_nxt  =  EXGTFRRegA[7:0];
+                                EXGTFR_REG_B:
+                                    b_nxt  =  EXGTFRRegA[7:0];
+                                EXGTFR_REG_CC:
+                                    cc_nxt =  EXGTFRRegA[7:0];
+                                default:
+                                begin
+                                end
+                            endcase
+                            rAVMA = 1'b0;
+                            CpuState_nxt   =  CPUSTATE_TFR_DONTCARE1;
+                        end
+                        else if (Inst1 == OPCODE_IMM_EXG)
+                        begin
+                            case (Inst2_nxt[7:4])
+                                EXGTFR_REG_D:
+                                    {a_nxt,b_nxt}  =  EXGTFRRegB;
+                                EXGTFR_REG_X:
+                                    x_nxt  =  EXGTFRRegB;
+                                EXGTFR_REG_Y:
+                                    y_nxt  =  EXGTFRRegB;
+                                EXGTFR_REG_U:
+                                    u_nxt  =  EXGTFRRegB;
+                                EXGTFR_REG_S:
+                                    s_nxt  =  EXGTFRRegB;
+                                EXGTFR_REG_PC:
+                                    pc_nxt =  EXGTFRRegB;
+                                EXGTFR_REG_DP:
+                                    dp_nxt =  EXGTFRRegB[7:0];
+                                EXGTFR_REG_A:
+                                    a_nxt  =  EXGTFRRegB[7:0];
+                                EXGTFR_REG_B:
+                                    b_nxt  =  EXGTFRRegB[7:0];
+                                EXGTFR_REG_CC:
+                                    cc_nxt =  EXGTFRRegB[7:0];
+                                default:
+                                begin
+                                end
+                            endcase
+                            case (Inst2_nxt[3:0])
+                                EXGTFR_REG_D:
+                                    {a_nxt,b_nxt}  =  EXGTFRRegA;
+                                EXGTFR_REG_X:
+                                    x_nxt  =  EXGTFRRegA;
+                                EXGTFR_REG_Y:
+                                    y_nxt  =  EXGTFRRegA;
+                                EXGTFR_REG_U:
+                                    u_nxt  =  EXGTFRRegA;
+                                EXGTFR_REG_S:
+                                    s_nxt  =  EXGTFRRegA;
+                                EXGTFR_REG_PC:
+                                    pc_nxt =  EXGTFRRegA;
+                                EXGTFR_REG_DP:
+                                    dp_nxt =  EXGTFRRegA[7:0];
+                                EXGTFR_REG_A:
+                                    a_nxt  =  EXGTFRRegA[7:0];
+                                EXGTFR_REG_B:
+                                    b_nxt  =  EXGTFRRegA[7:0];
+                                EXGTFR_REG_CC:
+                                    cc_nxt =  EXGTFRRegA[7:0];
+                                default:
+                                begin
+                                end
+                            endcase
+                            rAVMA = 1'b0;
+                            CpuState_nxt   =  CPUSTATE_EXG_DONTCARE1;
+                        end
+                    end
+                    else if (Is8BitInst)
+                    begin
+                        ALU_OP =  ALU8Op;
+                        if (IsTargetRegA)
+                            ALU_A  =  a;
+                        else
+                            ALU_A  =  b;
+                        ALU_B  =  Inst2_nxt;
+                        ALU_CC =  cc;
+                        cc_nxt =  ALU[15:8];
+                        if (ALU8Writeback)
+                        begin
+                            if (IsTargetRegA)
+                                a_nxt  =  ALU[7:0];
+                            else
+                                b_nxt  =  ALU[7:0];
+                        end
+                        rLIC = 1'b1;
+                        rAVMA = 1'b1;
+                        CpuState_nxt   =  CPUSTATE_FETCH_I1;
+                    end
+                    else
+                    begin
+                        if (IsALU16Opcode)
+                        begin
+                            // keep addr at 2nd byte (Inst2=0x01); 16IMM_LO will drive addr=pc (3rd byte)
+                            rAVMA = 1'b1;
+                            CpuState_nxt   =  CPUSTATE_16IMM_LO;
+                        end
+                    end
+                end
+                TYPE_RELATIVE:
+                begin
+                    if ( (InstPage2) || (Inst1 == INST_LBRA) || (Inst1 == INST_LBSR) )
+                    begin
+                        rAVMA = 1'b1;
+                        CpuState_nxt   =  CPUSTATE_LBRA_OFFSETLOW;
+                    end
+                    else
+                    begin
+                        rAVMA = 1'b0;
+                        CpuState_nxt   =  CPUSTATE_BRA_DONTCARE;
+                    end
+                end
+                default:
+                begin
+                    CpuState_nxt = CPUSTATE_FETCH_I1;
+                end
+            endcase
+            end
+        end
+        else
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_FETCH_I2_READ_USE;
+        end
+    end
     
     CPUSTATE_LBRA_OFFSETLOW:
     begin
@@ -2408,20 +2943,74 @@ begin
     
     CPUSTATE_RTS_HI:
     begin
-        addr_nxt       =  s;
-        s_nxt  =  s_p1;
-        pc_nxt[15:8]   =  D[7:0];
-        rAVMA = 1'b1;
-        CpuState_nxt   =  CPUSTATE_RTS_LO;
+        addr_nxt   = s;
+        s_nxt      = s_p1;
+        RnWOut     = 1'b1;
+        rAVMA      = 1'b1;
+        if (SYNC_MEM)
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_RTS_HI_READ_USE;
+        end
+        else
+        begin
+            pc_nxt[15:8]   = D[7:0];
+            CpuState_nxt   = CPUSTATE_RTS_LO;
+        end
+    end
+
+    CPUSTATE_RTS_HI_READ_USE:
+    begin
+        addr_nxt = addr;
+        RnWOut   = 1'b1;
+        rAVMA    = 1'b1;
+        if (MRDY)
+        begin
+            pc_nxt[15:8]   = D[7:0];
+            rd_pending_nxt = 1'b0;
+            CpuState_nxt   = CPUSTATE_RTS_LO;
+        end
+        else
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_RTS_HI_READ_USE;
+        end
     end
     
     CPUSTATE_RTS_LO:
     begin
-        addr_nxt       =  s;
-        s_nxt  =  s_p1;
-        pc_nxt[7:0]    =  D[7:0];
-        rAVMA = 1'b0;
-        CpuState_nxt   =  CPUSTATE_RTS_DONTCARE2;
+        addr_nxt   = s;
+        s_nxt      = s_p1;
+        RnWOut     = 1'b1;
+        rAVMA      = 1'b0;
+        if (SYNC_MEM)
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_RTS_LO_READ_USE;
+        end
+        else
+        begin
+            pc_nxt[7:0]    = D[7:0];
+            CpuState_nxt   = CPUSTATE_RTS_DONTCARE2;
+        end
+    end
+
+    CPUSTATE_RTS_LO_READ_USE:
+    begin
+        addr_nxt = addr;
+        RnWOut   = 1'b1;
+        rAVMA    = 1'b0;
+        if (MRDY)
+        begin
+            pc_nxt[7:0]    = D[7:0];
+            rd_pending_nxt = 1'b0;
+            CpuState_nxt   = CPUSTATE_RTS_DONTCARE2;
+        end
+        else
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_RTS_LO_READ_USE;
+        end
     end
     
     CPUSTATE_RTS_DONTCARE2:
@@ -2434,59 +3023,105 @@ begin
     
     CPUSTATE_16IMM_LO:
     begin
-        addr_nxt       =  pc;
-        pc_nxt =  pc_p1;
-        
-        ALU16_OP   =  ALU16Opcode;
-        ALU16_CC   =  cc;
-        ALU16_B    =  {Inst2, D[7:0]};
-        
-        case (ALU16Reg)
-            ALU16_REG_X:
-                ALU16_A    =  x;
-            ALU16_REG_D:
-                ALU16_A    =  {a, b};
-            ALU16_REG_Y:
-                ALU16_A    =  y;
-            ALU16_REG_U:
-                ALU16_A    =  u;
-            ALU16_REG_S:
-                ALU16_A    =  s;
-            default:
-                ALU16_A    =  16'H0;
-        endcase
-        
-        if (ALU16OpWriteback)
+        pc_nxt     = pc_p1;
+        RnWOut     = 1'b1;
+        rAVMA      = 1'b1;
+        if (SYNC_MEM)
         begin
+            // PC points at 2nd byte; read 3rd byte (low byte of imm16) from pc_p1
+            addr_nxt   = pc_p1;
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_16IMM_LO_READ_USE;
+        end
+        else
+        begin
+            addr_nxt   = pc;
+            ALU16_OP   =  ALU16Opcode;
+            ALU16_CC   =  cc;
+            ALU16_B    =  {Inst2, D[7:0]};
             case (ALU16Reg)
-                ALU16_REG_X:
-                    {cc_nxt, x_nxt}        =  ALU16; 
-                ALU16_REG_D:
-                    {cc_nxt, a_nxt, b_nxt} =  ALU16;
-                ALU16_REG_Y:
-                    {cc_nxt, y_nxt}        =  ALU16;
-                ALU16_REG_U:
-                    {cc_nxt, u_nxt}        =  ALU16;
-                ALU16_REG_S:
-                    {cc_nxt, s_nxt}        =  ALU16;
-                default:
-                begin
-                end
+                ALU16_REG_X: ALU16_A = x;
+                ALU16_REG_D: ALU16_A = {a, b};
+                ALU16_REG_Y: ALU16_A = y;
+                ALU16_REG_U: ALU16_A = u;
+                ALU16_REG_S: ALU16_A = s;
+                default:     ALU16_A = 16'H0;
             endcase
+            if (ALU16OpWriteback)
+            begin
+                case (ALU16Reg)
+                    ALU16_REG_X: {cc_nxt, x_nxt} = ALU16;
+                    ALU16_REG_D: {cc_nxt, a_nxt, b_nxt} = ALU16;
+                    ALU16_REG_Y: {cc_nxt, y_nxt} = ALU16;
+                    ALU16_REG_U: {cc_nxt, u_nxt} = ALU16;
+                    ALU16_REG_S: {cc_nxt, s_nxt} = ALU16;
+                    default: ;
+                endcase
+            end
+            else
+                cc_nxt = ALU16[23:16];
+            if (ALU16_OP == ALUOP16_LD)
+            begin
+                rLIC = 1'b1;
+                CpuState_nxt = CPUSTATE_FETCH_I1;
+            end
+            else
+            begin
+                rAVMA = 1'b0;
+                CpuState_nxt = CPUSTATE_16IMM_DONTCARE;
+            end
         end
-        else
-            cc_nxt = ALU16[23:16];
+    end
 
-        if (ALU16_OP == ALUOP16_LD)
+    CPUSTATE_16IMM_LO_READ_USE:
+    begin
+        addr_nxt = addr;
+        RnWOut   = 1'b1;
+        rAVMA    = 1'b1;
+        if (MRDY)
         begin
-            rLIC = 1'b1; // Instruction done!        
-            rAVMA = 1'b1;
-            CpuState_nxt   =  CPUSTATE_FETCH_I1;
+            // LD completed: advance PC to next instruction (past the 3rd byte of imm16)
+            pc_nxt     = pc_p1;
+            rd_pending_nxt = 1'b0;
+            ALU16_OP   = ALU16Opcode;
+            ALU16_CC   = cc;
+            ALU16_B    = {Inst2, D[7:0]};
+            case (ALU16Reg)
+                ALU16_REG_X: ALU16_A = x;
+                ALU16_REG_D: ALU16_A = {a, b};
+                ALU16_REG_Y: ALU16_A = y;
+                ALU16_REG_U: ALU16_A = u;
+                ALU16_REG_S: ALU16_A = s;
+                default:     ALU16_A = 16'H0;
+            endcase
+            if (ALU16OpWriteback)
+            begin
+                case (ALU16Reg)
+                    ALU16_REG_X: {cc_nxt, x_nxt} = ALU16;
+                    ALU16_REG_D: {cc_nxt, a_nxt, b_nxt} = ALU16;
+                    ALU16_REG_Y: {cc_nxt, y_nxt} = ALU16;
+                    ALU16_REG_U: {cc_nxt, u_nxt} = ALU16;
+                    ALU16_REG_S: {cc_nxt, s_nxt} = ALU16;
+                    default: ;
+                endcase
+            end
+            else
+                cc_nxt = ALU16[23:16];
+            if (ALU16_OP == ALUOP16_LD)
+            begin
+                rLIC = 1'b1;
+                CpuState_nxt = CPUSTATE_FETCH_I1;
+            end
+            else
+            begin
+                rAVMA = 1'b0;
+                CpuState_nxt = CPUSTATE_16IMM_DONTCARE;
+            end
         end
         else
         begin
-            rAVMA = 1'b0;
-            CpuState_nxt   =  CPUSTATE_16IMM_DONTCARE;
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_16IMM_LO_READ_USE;
         end
     end   
     
@@ -3635,156 +4270,309 @@ begin
     CPUSTATE_PUL_ACTION:
     begin
         rAVMA = 1'b1;
-        if (tmp[0])                    // CC
+        if (SYNC_MEM)
         begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            cc_nxt = D[7:0];
-            if (tmp[12] == 1'b1) // This pull is from an RTI, the E flag comes from the retrieved CC, and set the tmp_nxt accordingly, indicating what other registers to retrieve
+            // READ_ISSUE: drive address and stack increment; consume D in READ_USE.
+            RnWOut = 1'b1;
+            if (tmp[0])
             begin
-                if (D[CC_E_BIT])
-                    tmp_nxt[7:0] = 8'HFE;     // Retrieve all registers (ENTIRE) [CC is already retrieved]
-                else
-                    tmp_nxt[7:0] = 8'H80;     // Retrieve PC and CC [CC is already retrieved]
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
+            end
+            else if (tmp[1])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
+            end
+            else if (tmp[2])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
+            end
+            else if (tmp[3])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
+            end
+            else if (tmp[4] & (~tmp[15]))
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
+            end
+            else if (tmp[4] & tmp[15])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
+            end
+            else if (tmp[5] & (~tmp[15]))
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
+            end
+            else if (tmp[5] & tmp[15])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
+            end
+            else if (tmp[6] & (~tmp[15]))
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
+            end
+            else if (tmp[6] & tmp[15])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
+            end
+            else if (tmp[7] & (~tmp[15]))
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
+            end
+            else if (tmp[7] & tmp[15])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_ACTION_READ_USE;
             end
             else
-                tmp_nxt[0] = 1'b0;
-        end 
-        else if (tmp[1])                    // A
-        begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            a_nxt = D[7:0];
-            tmp_nxt[1] = 1'b0;
-        end         
-        else if (tmp[2])                    // B
-        begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            b_nxt = D[7:0];
-            tmp_nxt[2] = 1'b0;
-        end 
-        else if (tmp[3])                    // DP
-        begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            dp_nxt = D[7:0];
-            tmp_nxt[3] = 1'b0;
-        end        
-        else if (tmp[4] & (~tmp[15]))                    // X_HI
-        begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            x_nxt[15:8] = D[7:0];
-            tmp_nxt[15] = 1'b1;            
-        end
-        else if (tmp[4] & tmp[15])                    // X_LO
-        begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            x_nxt[7:0] = D[7:0];
-            tmp_nxt[4] = 1'b0;
-            tmp_nxt[15] = 1'b0;            
-        end
-        else if (tmp[5] & (~tmp[15]))                    // Y_HI
-        begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            y_nxt[15:8] = D[7:0];
-            tmp_nxt[15] = 1'b1;            
-        end
-        else if (tmp[5] & tmp[15])                    // Y_LO
-        begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            y_nxt[7:0] = D[7:0];
-            tmp_nxt[5] = 1'b0;
-            tmp_nxt[15] = 1'b0;            
-        end
-        else if (tmp[6] & (~tmp[15]))                    // U/S_HI
-        begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            if (tmp[14])
-                s_nxt[15:8] = D[7:0];
-            else
-                u_nxt[15:8] = D[7:0];
-            tmp_nxt[15] = 1'b1;            
-        end
-        else if (tmp[6] & tmp[15])                    // U/S_LO
-        begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            if (tmp[14])
-                s_nxt[7:0] = D[7:0];
-            else
-                u_nxt[7:0] = D[7:0];
-            tmp_nxt[6] = 1'b0;
-            tmp_nxt[15] = 1'b0;            
-        end
-        else if (tmp[7] & (~tmp[15]))                    // PC_HI
-        begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            pc_nxt[15:8] = D[7:0];
-            tmp_nxt[15] = 1'b1;            
-        end
-        else if (tmp[7] & tmp[15])                    // PC_LO
-        begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (tmp[14])
-                u_nxt = u_p1;
-            else
-                s_nxt = s_p1;
-            pc_nxt[7:0] = D[7:0];
-            tmp_nxt[7] = 1'b0;
-            tmp_nxt[15] = 1'b0;            
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (NextState == CPUSTATE_FETCH_I1) begin rAVMA = 1'b1; rLIC = 1'b1; end
+                else rAVMA = 1'b0;
+                CpuState_nxt = NextState;
+            end
         end
         else
         begin
-            addr_nxt = (tmp[14]) ? u : s;
-            if (NextState == CPUSTATE_FETCH_I1)
+            if (tmp[0])
             begin
-                rAVMA = 1'b1;
-                rLIC = 1'b1;
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                cc_nxt = D[7:0];
+                if (tmp[12] == 1'b1)
+                begin
+                    if (D[CC_E_BIT]) tmp_nxt[7:0] = 8'HFE; else tmp_nxt[7:0] = 8'H80;
+                end
+                else tmp_nxt[0] = 1'b0;
+            end
+            else if (tmp[1])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                a_nxt = D[7:0];
+                tmp_nxt[1] = 1'b0;
+            end
+            else if (tmp[2])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                b_nxt = D[7:0];
+                tmp_nxt[2] = 1'b0;
+            end
+            else if (tmp[3])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                dp_nxt = D[7:0];
+                tmp_nxt[3] = 1'b0;
+            end
+            else if (tmp[4] & (~tmp[15]))
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                x_nxt[15:8] = D[7:0];
+                tmp_nxt[15] = 1'b1;
+            end
+            else if (tmp[4] & tmp[15])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                x_nxt[7:0] = D[7:0];
+                tmp_nxt[4] = 1'b0;
+                tmp_nxt[15] = 1'b0;
+            end
+            else if (tmp[5] & (~tmp[15]))
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                y_nxt[15:8] = D[7:0];
+                tmp_nxt[15] = 1'b1;
+            end
+            else if (tmp[5] & tmp[15])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                y_nxt[7:0] = D[7:0];
+                tmp_nxt[5] = 1'b0;
+                tmp_nxt[15] = 1'b0;
+            end
+            else if (tmp[6] & (~tmp[15]))
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                if (tmp[14]) s_nxt[15:8] = D[7:0]; else u_nxt[15:8] = D[7:0];
+                tmp_nxt[15] = 1'b1;
+            end
+            else if (tmp[6] & tmp[15])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                if (tmp[14]) s_nxt[7:0] = D[7:0]; else u_nxt[7:0] = D[7:0];
+                tmp_nxt[6] = 1'b0;
+                tmp_nxt[15] = 1'b0;
+            end
+            else if (tmp[7] & (~tmp[15]))
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                pc_nxt[15:8] = D[7:0];
+                tmp_nxt[15] = 1'b1;
+            end
+            else if (tmp[7] & tmp[15])
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (tmp[14]) u_nxt = u_p1; else s_nxt = s_p1;
+                pc_nxt[7:0] = D[7:0];
+                tmp_nxt[7] = 1'b0;
+                tmp_nxt[15] = 1'b0;
             end
             else
-                rAVMA = 1'b0;
-            CpuState_nxt  = NextState;
-        end  
+            begin
+                addr_nxt = (tmp[14]) ? u : s;
+                if (NextState == CPUSTATE_FETCH_I1) begin rAVMA = 1'b1; rLIC = 1'b1; end
+                else rAVMA = 1'b0;
+                CpuState_nxt = NextState;
+            end
+        end
+    end
+
+    CPUSTATE_PUL_ACTION_READ_USE:
+    begin
+        rAVMA = 1'b1;
+        addr_nxt = addr;
+        RnWOut   = 1'b1;
+        if (MRDY)
+        begin
+            rd_pending_nxt = 1'b0;
+            if (tmp[0])
+            begin
+                cc_nxt = D[7:0];
+                if (tmp[12] == 1'b1)
+                begin
+                    if (D[CC_E_BIT]) tmp_nxt[7:0] = 8'HFE; else tmp_nxt[7:0] = 8'H80;
+                end
+                else tmp_nxt[0] = 1'b0;
+                CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else if (tmp[1])
+            begin
+                a_nxt = D[7:0];
+                tmp_nxt[1] = 1'b0;
+                CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else if (tmp[2])
+            begin
+                b_nxt = D[7:0];
+                tmp_nxt[2] = 1'b0;
+                CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else if (tmp[3])
+            begin
+                dp_nxt = D[7:0];
+                tmp_nxt[3] = 1'b0;
+                CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else if (tmp[4] & (~tmp[15]))
+            begin
+                x_nxt[15:8] = D[7:0];
+                tmp_nxt[15] = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else if (tmp[4] & tmp[15])
+            begin
+                x_nxt[7:0] = D[7:0];
+                tmp_nxt[4] = 1'b0;
+                tmp_nxt[15] = 1'b0;
+                CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else if (tmp[5] & (~tmp[15]))
+            begin
+                y_nxt[15:8] = D[7:0];
+                tmp_nxt[15] = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else if (tmp[5] & tmp[15])
+            begin
+                y_nxt[7:0] = D[7:0];
+                tmp_nxt[5] = 1'b0;
+                tmp_nxt[15] = 1'b0;
+                CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else if (tmp[6] & (~tmp[15]))
+            begin
+                if (tmp[14]) s_nxt[15:8] = D[7:0]; else u_nxt[15:8] = D[7:0];
+                tmp_nxt[15] = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else if (tmp[6] & tmp[15])
+            begin
+                if (tmp[14]) s_nxt[7:0] = D[7:0]; else u_nxt[7:0] = D[7:0];
+                tmp_nxt[6] = 1'b0;
+                tmp_nxt[15] = 1'b0;
+                CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else if (tmp[7] & (~tmp[15]))
+            begin
+                pc_nxt[15:8] = D[7:0];
+                tmp_nxt[15] = 1'b1;
+                CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else if (tmp[7] & tmp[15])
+            begin
+                pc_nxt[7:0] = D[7:0];
+                tmp_nxt[7] = 1'b0;
+                tmp_nxt[15] = 1'b0;
+                if (tmp_nxt[7:0] == 8'H00)
+                begin
+                    if (NextState == CPUSTATE_FETCH_I1) begin rAVMA = 1'b1; rLIC = 1'b1; end
+                    else rAVMA = 1'b0;
+                    CpuState_nxt = NextState;
+                end
+                else
+                    CpuState_nxt = CPUSTATE_PUL_DONTCARE1;
+            end
+            else
+                CpuState_nxt = NextState;
+        end
+        else
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_PUL_ACTION_READ_USE;
+        end
     end
                                       
     CPUSTATE_NMI_START:
@@ -3863,44 +4651,65 @@ begin
             INTTYPE_NMI:
             begin
                 addr_nxt = `NMI_VECTOR;
-                BS_nxt         =  1'b1; // ACK Interrupt
+                BS_nxt   = 1'b1;
             end
             INTTYPE_IRQ:
             begin
                 addr_nxt = `IRQ_VECTOR;
-                BS_nxt         =  1'b1; // ACK Interrupt
+                BS_nxt   = 1'b1;
             end
             INTTYPE_SWI:
-            begin
                 addr_nxt = `SWI_VECTOR;
-            end
             INTTYPE_FIRQ:
             begin
                 addr_nxt = `FIRQ_VECTOR;
-                BS_nxt         =  1'b1; // ACK Interrupt
+                BS_nxt   = 1'b1;
             end
             INTTYPE_SWI2:
-            begin
                 addr_nxt = `SWI2_VECTOR;
-            end
             INTTYPE_SWI3:
-            begin
                 addr_nxt = `SWI3_VECTOR;
-            end
-            default: // make the default an IRQ, even though it really should never happen 
+            default:
             begin
                 addr_nxt = `IRQ_VECTOR;
-                BS_nxt         =  1'b1; // ACK Interrupt
+                BS_nxt   = 1'b1;
             end
         endcase
-        
-        pc_nxt[15:8] = D[7:0];
-        rAVMA = 1'b1;
-        rBUSY = 1'b1;
-        rLIC = 1'b1;
-        CpuState_nxt = CPUSTATE_IRQ_VECTOR_LO;
-        
-        
+        RnWOut = 1'b1;
+        rAVMA  = 1'b1;
+        rBUSY  = 1'b1;
+        rLIC   = 1'b1;
+        if (SYNC_MEM)
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_IRQ_VECTOR_HI_READ_USE;
+        end
+        else
+        begin
+            pc_nxt[15:8]   = D[7:0];
+            CpuState_nxt   = CPUSTATE_IRQ_VECTOR_LO;
+        end
+    end
+
+    CPUSTATE_IRQ_VECTOR_HI_READ_USE:
+    begin
+        addr_nxt = addr;
+        RnWOut   = 1'b1;
+        rAVMA    = 1'b1;
+        rBUSY    = 1'b1;
+        rLIC     = 1'b1;
+        BS_nxt   = BS;
+        if (MRDY)
+        begin
+            pc_nxt[15:8]   = D[7:0];
+            rd_pending_nxt = 1'b0;
+            CpuState_nxt   = CPUSTATE_IRQ_VECTOR_LO;
+        end
+        else
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_IRQ_VECTOR_HI_READ_USE;
+        end
     end
     
     CPUSTATE_IRQ_VECTOR_LO:
@@ -3911,47 +4720,81 @@ begin
                 addr_nxt = `NMI_VECTOR+16'H1;
                 cc_nxt[CC_I_BIT] = 1'b1;
                 cc_nxt[CC_F_BIT] = 1'b1;
-                BS_nxt         =  1'b1; // ACK Interrupt
-            end                
+                BS_nxt   = 1'b1;
+            end
             INTTYPE_IRQ:
             begin
                 addr_nxt = `IRQ_VECTOR+16'H1;
-                cc_nxt[CC_I_BIT] = 1'b1;                
-                BS_nxt         =  1'b1; // ACK Interrupt
-            end  
+                cc_nxt[CC_I_BIT] = 1'b1;
+                BS_nxt   = 1'b1;
+            end
             INTTYPE_SWI:
             begin
                 addr_nxt = `SWI_VECTOR+16'H1;
                 cc_nxt[CC_F_BIT] = 1'b1;
                 cc_nxt[CC_I_BIT] = 1'b1;
                 rLIC = 1'b1;
-            end                  
+            end
             INTTYPE_FIRQ:
             begin
                 addr_nxt = `FIRQ_VECTOR+16'H1;
-                cc_nxt[CC_F_BIT] = 1'b1;                                
+                cc_nxt[CC_F_BIT] = 1'b1;
                 cc_nxt[CC_I_BIT] = 1'b1;
-                BS_nxt         =  1'b1; // ACK Interrupt
-            end                  
+                BS_nxt   = 1'b1;
+            end
             INTTYPE_SWI2:
             begin
                 addr_nxt = `SWI2_VECTOR+16'H1;
-                rLIC = 1'b1;                
-            end                  
+                rLIC = 1'b1;
+            end
             INTTYPE_SWI3:
             begin
                 addr_nxt = `SWI3_VECTOR+16'H1;
                 rLIC = 1'b1;
-            end                
-            default:
-            begin
             end
+            default: ;
         endcase
-    
-        pc_nxt[7:0] = D[7:0];
-        rAVMA = 1'b1;
-        rLIC = 1'b1;
-        CpuState_nxt = CPUSTATE_INT_DONTCARE;
+        RnWOut = 1'b1;
+        rAVMA  = 1'b1;
+        rLIC   = 1'b1;
+        if (SYNC_MEM)
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_IRQ_VECTOR_LO_READ_USE;
+        end
+        else
+        begin
+            pc_nxt[7:0]   = D[7:0];
+            CpuState_nxt  = CPUSTATE_INT_DONTCARE;
+        end
+    end
+
+    CPUSTATE_IRQ_VECTOR_LO_READ_USE:
+    begin
+        addr_nxt = addr;
+        RnWOut   = 1'b1;
+        rAVMA    = 1'b1;
+        rLIC     = 1'b1;
+        if (MRDY)
+        begin
+            pc_nxt[7:0]   = D[7:0];
+            rd_pending_nxt = 1'b0;
+            CpuState_nxt   = CPUSTATE_INT_DONTCARE;
+            case (IntType)
+                INTTYPE_NMI: begin cc_nxt[CC_I_BIT] = 1'b1; cc_nxt[CC_F_BIT] = 1'b1; BS_nxt = 1'b1; end
+                INTTYPE_IRQ: begin cc_nxt[CC_I_BIT] = 1'b1; BS_nxt = 1'b1; end
+                INTTYPE_SWI: begin cc_nxt[CC_F_BIT] = 1'b1; cc_nxt[CC_I_BIT] = 1'b1; rLIC = 1'b1; end
+                INTTYPE_FIRQ: begin cc_nxt[CC_F_BIT] = 1'b1; cc_nxt[CC_I_BIT] = 1'b1; BS_nxt = 1'b1; end
+                INTTYPE_SWI2: rLIC = 1'b1;
+                INTTYPE_SWI3: rLIC = 1'b1;
+                default: ;
+            endcase
+        end
+        else
+        begin
+            rd_pending_nxt = 1'b1;
+            CpuState_nxt   = CPUSTATE_IRQ_VECTOR_LO_READ_USE;
+        end
     end
     
     CPUSTATE_INT_DONTCARE:
@@ -4127,7 +4970,7 @@ begin
             cc_nxt[CC_I_BIT] = 1'b1;
             CpuState_nxt = CPUSTATE_IRQ_VECTOR_HI;
         end
-        else if ((FIRQLatched == 0) && (cc[CC_F_BIT] == 0))
+        else if ((FIRQSample == 0) && (cc[CC_F_BIT] == 0))
         begin
             rAVMA = 1'b1;
             cc_nxt[CC_F_BIT] = 1'b1;
@@ -4135,7 +4978,7 @@ begin
             IntType_nxt = INTTYPE_FIRQ;
             CpuState_nxt = CPUSTATE_IRQ_VECTOR_HI;
         end
-        else if ((IRQLatched == 0) && (cc[CC_I_BIT] == 0))
+        else if ((IRQSample == 0) && (cc[CC_I_BIT] == 0))
         begin
             rAVMA = 1'b1;
             cc_nxt[CC_I_BIT] = 1'b1;
