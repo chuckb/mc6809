@@ -23,6 +23,7 @@ module mc6809e(
     output  [7:0] DOut,
     output  [15:0] ADDR,
     output  RnW,
+    input   CLK_ROOT,
     input   E,
     input   Q,
     output  BS,
@@ -41,7 +42,7 @@ module mc6809e(
 
 
 // No MRDY pin; tie high for sync-memory pipeline (core uses SYNC_MEM=1 by default).
-mc6809i cpucore (.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .E(E), .Q(Q), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ),
+mc6809i cpucore (.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .CLK_ROOT(CLK_ROOT), .E(E), .Q(Q), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ),
                 .nNMI(nNMI), .AVMA(AVMA), .BUSY(BUSY), .LIC(LIC), .nHALT(nHALT), .nRESET(nRESET), .nDMABREQ(1'b1),
                 .MRDY(1'b1));
 

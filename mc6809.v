@@ -53,8 +53,8 @@ reg    rQ = 0;
 assign E = rE;
 assign Q = rQ;
 
-// MRDY is handled inside the core (stalls READ_USE until MRDY=1). E/Q always run from EXTAL.
-mc6809i cpucore(.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .E(E), .Q(Q), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ),
+// MRDY is handled inside the core (stalls READ_USE until MRDY=1). E/Q run from EXTAL. CLK_ROOT = EXTAL for Phase 1.
+mc6809i cpucore(.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .CLK_ROOT(EXTAL), .E(E), .Q(Q), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ),
                 .nNMI(nNMI), .AVMA(AVMA), .BUSY(BUSY), .LIC(LIC), .nHALT(nHALT), .nRESET(nRESET), .nDMABREQ(nDMABREQ),
                 .MRDY(MRDY), .RegData(RegData));
 

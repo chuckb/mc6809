@@ -52,6 +52,7 @@ module mc6809i
     output  [7:0]  DOut,
     output  [15:0] ADDR,
     output  RnW,
+    input   CLK_ROOT,
     input   E,
     input   Q,
     output  BS,
@@ -552,7 +553,18 @@ endgenerate
 
 
 ///////////////////////////////////////////////////////////////////////
+// Phase 1: Core is clocked by CLK_ROOT. E and Q are used only to derive
+// strobes (CE_E_FALL, CE_Q_FALL); state and interrupt sampling advance
+// when the appropriate strobe is true. Behavior matches former negedge E / negedge Q.
+///////////////////////////////////////////////////////////////////////
 
+reg E_prev = 1'b0;
+reg Q_prev = 1'b0;
+wire CE_E_FALL = E_prev & ~E;
+wire CE_Q_FALL = Q_prev & ~Q;
+// Rise strobes for future use (Phase 2+); unused in Phase 1.
+wire CE_E_RISE = ~E_prev & E;
+wire CE_Q_RISE = ~Q_prev & Q;
 
 always @(negedge NMISample2 or posedge wNMIClear)
 begin
@@ -566,106 +578,75 @@ end
 
 //
 // The 6809 specs say that the CPU control signals are sampled on the falling edge of Q.
-// It also says that the interrupts require 1 cycle of synchronization time.  
-// That's vague, as it doesn't say where "1 cycle" starts or ends.  Starting from the
-// falling edge of Q, the next cycle notices an assertion.  From checking a hard 6809 on
-// an analyzer, what they really mean is that it's sampled on the falling edge of Q, 
-// but there's a one cycle delay from the falling edge of E (0.25 clocks from the falling edge of Q
-// where the signals were sampled) before it can be noticed.  
-// So, SIGNALSample is the latched value at the falling edge of Q
-//     SIGNALSample2 is the latched value at the falling edge of E (0.25 clocks after the line above)
-//     SIGNALLatched is the latched value at the falling edge of E (1 cycle after the line above)
+// SIGNALSample at Q fall, SIGNALSample2/SIGNALLatched at E fall (see comments below).
+// We now run on posedge CLK_ROOT and act only when CE_Q_FALL or CE_E_FALL.
 //
-// /HALT and /DMABREQ are delayed one cycle less than interrupts.  The 6809 specs infer these details,
-// but don't list the point-of-reference they're written from (for instance, they say that an interrupt requires
-// a cycle for synchronization; however, it isn't clear whether that's from the falling Q to the next falling Q,
-// a complete intermediate cycle, the falling E to the next falling E, etc.) - which, in the end, required an
-// analyzer on the 6809 to determine how many cycles before a new instruction an interrupt (or /HALT & /DMABREQ)
-// had to be asserted to be noted instead of the next instruction running start to finish.  
-// 
-always @(negedge Q)
-begin
-    NMISample <= nNMI;
-    
-    IRQSample <= nIRQ;
-
-    FIRQSample <= nFIRQ;
-
-    HALTSample <= nHALT;
-    
-    DMABREQSample <= nDMABREQ;
-
-        
-end
-
-
 reg rnRESET=0; // The latched version of /RESET, useful 1 clock after it's latched
-always @(negedge E)
+always @(posedge CLK_ROOT)
 begin
-    rnRESET <= nRESET;
-    
-    NMISample2 <= NMISample;
-    
-    IRQSample2 <= IRQSample;
-    IRQLatched <= IRQSample2;
+    // Edge detection: strobes are true for one CLK_ROOT cycle after E/Q fall.
+    E_prev <= E;
+    Q_prev <= Q;
 
-    FIRQSample2 <= FIRQSample;
-    FIRQLatched <= FIRQSample2;
-
-    HALTSample2 <= HALTSample;
-    HALTLatched <= HALTSample2;
-
-    DMABREQSample2 <= DMABREQSample;
-    DMABREQLatched <= DMABREQSample2;
-
-    if (rnRESET == 1)
+    if (CE_Q_FALL)
     begin
-        rd_pending <= rd_pending_nxt;
-        // When SYNC_MEM and waiting for MRDY, do not advance state or consume data.
-        // When SYNC_MEM and waiting for MRDY, do not advance state or consume data.
-        if (!(SYNC_MEM && rd_pending && (MRDY == 1'b0)))
-        begin
-            CpuState <= CpuState_nxt;
-            
-            // Don't interpret this next item as "The Next State"; it's a special case 'after this 
-            // generic state, go to this programmable state', so that a single state 
-            // can be shared for many tasks. [Specifically, the stack push/pull code, which is used
-            // for PSH, PUL, Interrupts, RTI, etc.
-            NextState <= NextState_nxt;
-             
-            // CPU registers latch from the combinatorial circuit
-            a <= a_nxt;
-        b <= b_nxt;
-        x <= x_nxt;
-        y <= y_nxt;
-        s <= s_nxt;
-        u <= u_nxt;
-        cc <= cc_nxt;
-        dp <= dp_nxt;
-        pc <= pc_nxt;
-        tmp <= tmp_nxt;
-        addr <= addr_nxt;
-        ea <= ea_nxt;
-        
-        InstPage2 <= InstPage2_nxt;
-        InstPage3 <= InstPage3_nxt;
-        Inst1 <= Inst1_nxt;
-        Inst2 <= Inst2_nxt;
-        Inst3 <= Inst3_nxt;
-        NMIClear <= NMIClear_nxt;
-        
-        IntType <= IntType_nxt;
-        
-        if (s != s_nxt)                 // Once S changes at all (default is '0'), release the NMI Mask.
-            NMIMask <= 1'b0;
-        end
+        NMISample <= nNMI;
+        IRQSample <= nIRQ;
+        FIRQSample <= nFIRQ;
+        HALTSample <= nHALT;
+        DMABREQSample <= nDMABREQ;
     end
-    else
+
+    if (CE_E_FALL)
     begin
-        CpuState <= CPUSTATE_RESET;
-        rd_pending <= 1'b0;
-        NMIMask <= 1'b1; // Mask NMI until S is loaded.
-        NMIClear <= 1'b0; // Mark us as not having serviced NMI
+        rnRESET <= nRESET;
+        NMISample2 <= NMISample;
+        IRQSample2 <= IRQSample;
+        IRQLatched <= IRQSample2;
+        FIRQSample2 <= FIRQSample;
+        FIRQLatched <= FIRQSample2;
+        HALTSample2 <= HALTSample;
+        HALTLatched <= HALTSample2;
+        DMABREQSample2 <= DMABREQSample;
+        DMABREQLatched <= DMABREQSample2;
+
+        if (rnRESET == 1)
+        begin
+            rd_pending <= rd_pending_nxt;
+            if (!(SYNC_MEM && rd_pending && (MRDY == 1'b0)))
+            begin
+                CpuState <= CpuState_nxt;
+                NextState <= NextState_nxt;
+                a <= a_nxt;
+                b <= b_nxt;
+                x <= x_nxt;
+                y <= y_nxt;
+                s <= s_nxt;
+                u <= u_nxt;
+                cc <= cc_nxt;
+                dp <= dp_nxt;
+                pc <= pc_nxt;
+                tmp <= tmp_nxt;
+                addr <= addr_nxt;
+                ea <= ea_nxt;
+                InstPage2 <= InstPage2_nxt;
+                InstPage3 <= InstPage3_nxt;
+                Inst1 <= Inst1_nxt;
+                Inst2 <= Inst2_nxt;
+                Inst3 <= Inst3_nxt;
+                NMIClear <= NMIClear_nxt;
+                IntType <= IntType_nxt;
+                if (s != s_nxt)
+                    NMIMask <= 1'b0;
+            end
+        end
+        else
+        begin
+            CpuState <= CPUSTATE_RESET;
+            rd_pending <= 1'b0;
+            NMIMask <= 1'b1;
+            NMIClear <= 1'b0;
+        end
     end
 end
 

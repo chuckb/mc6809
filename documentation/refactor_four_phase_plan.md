@@ -76,3 +76,4 @@ The point of this refactor is to get the part closer to its silicon rendition de
 ## Resources
 
 - Tools to elaborate verilog and run sim are located in /home/chuck/oss-cad-suite/environment
+- The full test suite can take some time to run. Run with a 5-minute time out so you do not waste time by cutting the test off early.
