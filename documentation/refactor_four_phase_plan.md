@@ -48,7 +48,7 @@ The point of this refactor is to get the part closer to its silicon rendition de
 
 ## Phase 3: Roll out one-cycle reads to all read paths
 
-**Goal:** Every read uses one cycle (issue on one phase, use on the next within same E period); remove redundant READ_USE states.
+**Goal:** Every read uses one cycle (issue on one phase (Q rise), use on the next within same E period (at E fall)); remove redundant READ_USE states.
 
 - Apply the same pattern to all read paths (fetch, immediates, stack pull, vectors, RTS, etc.). After each path or small batch, run the tests that hit it.
 - **Gate:** Full test suite passes.

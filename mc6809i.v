@@ -1850,16 +1850,60 @@ begin
         end
         else if (SYNC_MEM)
         begin
-            // READ_ISSUE: assert address for inst fetch; consume D in READ_USE (next cycle).
-            // Do not advance PC here; FETCH_I1_READ_USE advances after consuming the byte.
+            // Phase 2 one-cycle read (pilot): address already out (addr_nxt=pc). Latch D and advance on E_fall when MRDY.
+            // No READ_USE for first byte; same E period: address phase (we're in FETCH_I1) then data phase (E_fall).
             addr_nxt       = pc;
-            pc_nxt         = pc;
             RnWOut         = 1'b1;
             InstPage2_nxt  = 0;
             InstPage3_nxt  = 0;
             rAVMA          = 1'b1;
-            rd_pending_nxt = 1'b1;
-            CpuState_nxt   = CPUSTATE_FETCH_I1_READ_USE;
+            if (MRDY)
+            begin
+                Inst1_nxt     = MappedInstruction;
+                pc_nxt        = pc_p1;
+                rd_pending_nxt = 1'b0;
+                if (NMILatched == 0)
+                begin
+                    pc_nxt = pc;
+                    rAVMA = 1'b1;
+                    CpuState_nxt = CPUSTATE_NMI_START;
+                end
+                else if ((FIRQSample == 0) && (cc[CC_F_BIT] == 0))
+                begin
+                    pc_nxt = pc;
+                    rAVMA = 1'b1;
+                    CpuState_nxt = CPUSTATE_FIRQ_START;
+                end
+                else if ((IRQSample == 0) && (cc[CC_I_BIT] == 0))
+                begin
+                    pc_nxt = pc;
+                    rAVMA = 1'b1;
+                    CpuState_nxt = CPUSTATE_IRQ_START;
+                end
+                else if (MappedInstruction == 8'H10)
+                begin
+                    InstPage2_nxt = 1;
+                    rAVMA = 1'b1;
+                    CpuState_nxt  = CPUSTATE_FETCH_I1V2;
+                end
+                else if (MappedInstruction == 8'H11)
+                begin
+                    InstPage3_nxt = 1;
+                    rAVMA = 1'b1;
+                    CpuState_nxt  = CPUSTATE_FETCH_I1V2;
+                end
+                else
+                begin
+                    rAVMA = 1'b1;
+                    CpuState_nxt  = CPUSTATE_FETCH_I2;
+                end
+            end
+            else
+            begin
+                pc_nxt         = pc;
+                rd_pending_nxt = 1'b1;
+                CpuState_nxt   = CPUSTATE_FETCH_I1;
+            end
         end
         else
         begin
