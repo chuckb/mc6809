@@ -53,6 +53,8 @@ The point of this refactor is to get the part closer to its silicon rendition de
 - Apply the same pattern to all read paths (fetch, immediates, stack pull, vectors, RTS, etc.). After each path or small batch, run the tests that hit it.
 - **Gate:** Full test suite passes.
 
+**Done:** One-cycle applied to RESET0/RESET2, FETCH_I1V2, FETCH_I2, RTS_HI/LO, PUL_ACTION, IRQ_VECTOR_HI/LO. For SYNC_MEM, **16IMM_LO** remains two-cycle (16IMM_LO → 16IMM_LO_READ_USE) so LDD #imm16 and indexed tests pass; other READ_USE states are no longer entered. Full suite (15 tests) passes. Phase 5 can remove dead READ_USE blocks and optionally convert 16IMM_LO to one-cycle if desired.
+
 ---
 
 ## Phase 4: MRDY as clock stretch (E high, Q low)
