@@ -86,6 +86,16 @@ The point of this refactor is to get the part closer to its silicon rendition de
 - Document: master clock and E/Q (and strobes/levels) as **inputs**; driver responsibility; one-cycle reads (address at Q phase, data at E fall); MRDY stretch in the driver.
 - **Gate:** Full suite passes; docs and code aligned.
 
+**Done:** Comments in mc6809i.v updated. 16IMM_LO left as two-cycle (16IMM_LO → 16IMM_LO_READ_USE) so LDD passes; single-E-period one-cycle for 16IMM_LO failed under test. All other reads use Q_rise (address ready) / E_fall (data ready) pattern; when MRDY=0 the wrapper stretches E high / Q low. Full suite passes.
+
+---
+
+## Clocking and MRDY (summary)
+
+- **mc6809i (core):** Takes **CLK_ROOT**, **E**, **Q**, and **MRDY** as inputs. Does not drive E/Q. State and data advance on **CE_E_FALL**; some entry (e.g. FETCH_I1) deferred to **CE_Q_RISE** so address is valid during Q high. All memory reads complete with **address ready at Q rise** (or start of read cycle), **data ready at E fall**; if MRDY=0 the core does not complete the read until MRDY=1.
+- **mc6809.v (XTAL wrapper):** Derives **E** and **Q** from EXTAL (four-phase divider). When **MRDY=0** during E high / Q low, holds E and Q in that phase for extra quarter-cycles (up to MRDY_STRETCH_LIMIT). E and Q are outputs to the core and to the board.
+- **mc6809e.v:** Takes external CLK_ROOT, E, Q; no MRDY (tied high); no E/Q generation.
+
 ## Resources
 
 - Tools to elaborate verilog and run sim are located in /home/chuck/oss-cad-suite/environment

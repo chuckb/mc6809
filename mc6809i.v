@@ -37,8 +37,9 @@
 // "IGNORE"- Cause the soft core to merely ignore illegal instructions.  It will consider them 1-byte instructions and
 //           attempt to fetch and run an exception 1 byte later.
 //
-// "SYNC_MEM" - Enable synchronous memory pipeline. When enabled, the core will use MRDY to stall READ_USE until the memory
-//              has had a cycle to respond. This is useful for synchronous memory systems like BRAM.
+// "SYNC_MEM" - Enable synchronous memory pipeline. All memory reads use: address phase (Q rise / address ready),
+//              data phase (E fall / data ready). When MRDY=0 the wrapper (e.g. mc6809.v) stretches E high / Q low;
+//              the core also stalls read completion until MRDY=1. For synchronous memory (e.g. BRAM).
 //
 
 module mc6809i
@@ -154,13 +155,12 @@ reg     [15:0]          tmp_nxt;
 reg                     BS_nxt;
 reg                     BA_nxt;
 
-// Phase 2/3: one-cycle read — drive fetch address when we deferred entry to FETCH_I1 to Q_rise (declared before use in ADDR).
+// One-cycle read: Q_rise = address phase, E_fall = data phase. FETCH_I1 entry deferred to Q_rise.
 reg enter_fetch_at_q_rise = 1'b0;
 
 // for ADDR, BS/BA, assign them to the flops
 assign BS = BS_nxt;
 assign BA = BA_nxt;
-// When we deferred entry to FETCH_I1 to Q_rise, drive fetch address (pc) so bus is correct from E_fall until we enter at Q_rise.
 assign ADDR = enter_fetch_at_q_rise ? pc : addr_nxt;
 
 localparam CC_E=  8'H80;
@@ -232,9 +232,8 @@ localparam INTTYPE_SWI3     = 3'H5 ;
 reg [2:0] IntType;
 reg [2:0] IntType_nxt;
 
-// READ_ISSUE/READ_USE added to support synchronous (registered-read) memory; MRDY stalls
-// READ_USE completion. When SYNC_MEM=1, reads are two-phase: issue address one cycle,
-// consume D the next (or when MRDY=1). Prevents same-cycle consumption of D.
+// Read timing: address at Q rise (or first E period), data consumed at E fall. MRDY stretches E/Q in wrapper
+// and gates read completion here. rd_pending when waiting for MRDY.
 reg rd_pending = 1'b0;
 reg rd_pending_nxt;
 
@@ -555,18 +554,16 @@ begin
 end
 endgenerate
 
-
 ///////////////////////////////////////////////////////////////////////
-// Phase 1: Core is clocked by CLK_ROOT. E and Q are used only to derive
-// strobes (CE_E_FALL, CE_Q_FALL); state and interrupt sampling advance
-// when the appropriate strobe is true. Behavior matches former negedge E / negedge Q.
+// Core is clocked by CLK_ROOT. E and Q are level inputs only to derive
+// strobes; state and interrupt sampling advance
+// when the appropriate strobe is true.
 ///////////////////////////////////////////////////////////////////////
 
 reg E_prev = 1'b0;
 reg Q_prev = 1'b0;
 wire CE_E_FALL = E_prev & ~E;
 wire CE_Q_FALL = Q_prev & ~Q;
-// Rise strobes: Phase 2+ use Q_rise for address phase (issue read), E_fall for data phase (latch).
 wire CE_E_RISE = ~E_prev & E;
 wire CE_Q_RISE = ~Q_prev & Q;
 
@@ -601,7 +598,7 @@ begin
         DMABREQSample <= nDMABREQ;
     end
 
-    // Phase 2/3: Address phase = Q_rise, data phase = E_fall. Enter one-cycle read state at Q_rise so address is valid during Q high.
+    // Address phase = Q_rise, data phase = E_fall. Enter one-cycle read state at Q_rise so address is valid during Q high.
     if (CE_Q_RISE)
     begin
         if (enter_fetch_at_q_rise)
@@ -626,14 +623,14 @@ begin
 
         if (rnRESET == 1)
         begin
-            // Defer transition to FETCH_I1 to Q_rise (address phase) when SYNC_MEM; latch data at this E_fall (data phase).
+            // Defer transition to FETCH_I1 or 16IMM_LO to Q_rise (address phase) when SYNC_MEM; latch data at E_fall (data phase).
             // Do not defer from RESET0/RESET2 (vector latch), ALU_EA (data-at-EA read), PUL_ACTION (stack pull), or INT_DONTCARE (after vector load).
-            if (SYNC_MEM && (CpuState != CPUSTATE_FETCH_I1) && (CpuState_nxt == CPUSTATE_FETCH_I1)
+            if (SYNC_MEM && !enter_fetch_at_q_rise
+                && (CpuState != CPUSTATE_FETCH_I1) && (CpuState_nxt == CPUSTATE_FETCH_I1)
                 && (CpuState != CPUSTATE_RESET0) && (CpuState != CPUSTATE_RESET2) && (CpuState != CPUSTATE_ALU_EA)
                 && (CpuState != CPUSTATE_PUL_ACTION) && (CpuState != CPUSTATE_INT_DONTCARE))
             begin
                 enter_fetch_at_q_rise <= 1'b1;
-                // Apply all reg updates except CpuState so when we enter FETCH_I1 at Q_rise we have correct state (e.g. a,b from LDD).
                 NextState <= NextState_nxt;
                 a <= a_nxt;
                 b <= b_nxt;
@@ -657,7 +654,10 @@ begin
                 rd_pending <= rd_pending_nxt;
                 if (s != s_nxt)
                     NMIMask <= 1'b0;
-                // CpuState updates at Q_rise
+            end
+            else if (enter_fetch_at_q_rise)
+            begin
+                // Waiting for Q_rise to enter read state; do not update CpuState or other regs
             end
             else if (!(SYNC_MEM && rd_pending && (MRDY == 1'b0)))
             begin
@@ -1876,8 +1876,6 @@ begin
         end
         else if (SYNC_MEM)
         begin
-            // Phase 2 one-cycle read (pilot): address already out (addr_nxt=pc). Latch D and advance on E_fall when MRDY.
-            // No READ_USE for first byte; same E period: address phase (we're in FETCH_I1) then data phase (E_fall).
             addr_nxt       = pc;
             RnWOut         = 1'b1;
             InstPage2_nxt  = 0;
@@ -3366,14 +3364,13 @@ begin
         rAVMA      = 1'b1;
         if (SYNC_MEM)
         begin
-            // PC points at 2nd byte; read 3rd byte (low byte of imm16) from pc_p1
-            addr_nxt   = pc_p1;
+            addr_nxt   = pc_p1;   // 3rd byte; one cycle address then READ_USE (Q_rise addr, E_fall data over two E periods)
             rd_pending_nxt = 1'b1;
             CpuState_nxt   = CPUSTATE_16IMM_LO_READ_USE;
         end
         else
         begin
-            addr_nxt   = pc_p1;   // read 3rd byte (low byte of imm16)
+            addr_nxt   = pc_p1;
             ALU16_OP   =  ALU16Opcode;
             ALU16_CC   =  cc;
             ALU16_B    =  {Inst2, D[7:0]};
@@ -3460,8 +3457,8 @@ begin
             rd_pending_nxt = 1'b1;
             CpuState_nxt   = CPUSTATE_16IMM_LO_READ_USE;
         end
-    end   
-    
+    end
+
     CPUSTATE_DIRECT_DONTCARE:
     begin
         addr_nxt       =  16'HFFFF;
@@ -4609,7 +4606,7 @@ begin
         rAVMA = 1'b1;
         if (SYNC_MEM)
         begin
-            // Phase 3 one-cycle: address out, latch D on E_fall when MRDY.
+            // One-cycle read: address out on Q_rise, latch D on E_fall when MRDY.
             RnWOut = 1'b1;
             if (tmp[0])
             begin

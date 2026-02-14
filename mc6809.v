@@ -53,9 +53,9 @@ reg    rQ = 0;
 assign E = rE;
 assign Q = rQ;
 
-// Phase 4: E/Q derived from EXTAL; when MRDY=0 during E-high/Q-low (phase 11), hold that phase for extra
+// E/Q derived from EXTAL; when MRDY=0 during E-high/Q-low (phase 11), hold that phase for extra
 // quarter-cycles (stretch) so memory has time to respond. Limit stretch to MRDY_STRETCH_LIMIT quarter-cycles.
-parameter MRDY_STRETCH_LIMIT = 16;  // max extra quarter-cycles when MRDY=0 (tune per manual if needed)
+parameter MRDY_STRETCH_LIMIT = 10;  // max extra quarter-cycles when MRDY=0 (tuned per manual)
 reg [4:0] stretch_count = 5'b0;     // count stretch cycles; saturate at limit
 
 // MRDY is used here for stretch and inside the core (stalls read until MRDY=1). CLK_ROOT = EXTAL.
