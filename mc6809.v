@@ -53,24 +53,42 @@ reg    rQ = 0;
 assign E = rE;
 assign Q = rQ;
 
-// MRDY is handled inside the core (stalls READ_USE until MRDY=1). E/Q run from EXTAL. CLK_ROOT = EXTAL for Phase 1.
+// Phase 4: E/Q derived from EXTAL; when MRDY=0 during E-high/Q-low (phase 11), hold that phase for extra
+// quarter-cycles (stretch) so memory has time to respond. Limit stretch to MRDY_STRETCH_LIMIT quarter-cycles.
+parameter MRDY_STRETCH_LIMIT = 16;  // max extra quarter-cycles when MRDY=0 (tune per manual if needed)
+reg [4:0] stretch_count = 5'b0;     // count stretch cycles; saturate at limit
+
+// MRDY is used here for stretch and inside the core (stalls read until MRDY=1). CLK_ROOT = EXTAL.
 mc6809i cpucore(.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .CLK_ROOT(EXTAL), .E(E), .Q(Q), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ),
                 .nNMI(nNMI), .AVMA(AVMA), .BUSY(BUSY), .LIC(LIC), .nHALT(nHALT), .nRESET(nRESET), .nDMABREQ(nDMABREQ),
                 .MRDY(MRDY), .RegData(RegData));
 
 always @(negedge CLK)
 begin
-    case (clk_phase)
-        2'b00:
-            rE <= 0;
-        2'b01:
-            rQ <= 1;
-        2'b10:
-            rE <= 1;
-        2'b11:
-            rQ <= 0;
-    endcase
-    clk_phase <= clk_phase + 2'b01;
+    if (clk_phase == 2'b11 && MRDY == 1'b0 && stretch_count < MRDY_STRETCH_LIMIT)
+    begin
+        // E high, Q low: stretch — hold phase 11 (E=1, Q=0) for another quarter-cycle
+        stretch_count <= stretch_count + 1'b1;
+        rQ <= 1'b0;   // keep Q low (re-assert phase 11 outputs)
+        rE <= 1'b1;   // keep E high
+        clk_phase <= 2'b11;
+    end
+    else
+    begin
+        if (clk_phase != 2'b11 || MRDY == 1'b1)
+            stretch_count <= 5'b0;
+        case (clk_phase)
+            2'b00:
+                rE <= 0;
+            2'b01:
+                rQ <= 1;
+            2'b10:
+                rE <= 1;
+            2'b11:
+                rQ <= 0;
+        endcase
+        clk_phase <= clk_phase + 2'b01;
+    end
 end
 
 
