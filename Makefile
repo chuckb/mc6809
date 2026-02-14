@@ -16,6 +16,8 @@ MRDY_WAIT_VVP = $(BUILD_DIR)/tb_mrdy_wait.vvp
 RTI_MRDY_VVP = $(BUILD_DIR)/tb_rti_mrdy.vvp
 IRQ_ASYNC_VVP = $(BUILD_DIR)/tb_irq_async.vvp
 JSR_RTS_VVP = $(BUILD_DIR)/tb_jsr_rts.vvp
+LDA_EXT_VVP = $(BUILD_DIR)/tb_lda_ext.vvp
+LDA_IDX_VVP = $(BUILD_DIR)/tb_lda_idx.vvp
 
 CORE = mc6809i.v mc6809.v
 SIM_SRC = $(CORE) test/tb_sync_mem.v
@@ -31,13 +33,15 @@ MRDY_WAIT_SRC = $(CORE) test/tb_mrdy_wait.v
 RTI_MRDY_SRC = $(CORE) test/tb_rti_mrdy.v
 IRQ_ASYNC_SRC = $(CORE) test/tb_irq_async.v
 JSR_RTS_SRC = $(CORE) test/tb_jsr_rts.v
+LDA_EXT_SRC = $(CORE) test/tb_lda_ext.v
+LDA_IDX_SRC = $(CORE) test/tb_lda_idx.v
 
-ALL_VVP = $(SIM_VVP) $(IRQ_VVP) $(FIRQ_VVP) $(NMI_VVP) $(ANDCC_VVP) $(ORCC_VVP) $(LDD_VVP) $(PSHU_VVP) $(PAGE2_VVP) $(MRDY_WAIT_VVP) $(RTI_MRDY_VVP) $(IRQ_ASYNC_VVP) $(JSR_RTS_VVP)
+ALL_VVP = $(SIM_VVP) $(IRQ_VVP) $(FIRQ_VVP) $(NMI_VVP) $(ANDCC_VVP) $(ORCC_VVP) $(LDD_VVP) $(PSHU_VVP) $(PAGE2_VVP) $(MRDY_WAIT_VVP) $(RTI_MRDY_VVP) $(IRQ_ASYNC_VVP) $(JSR_RTS_VVP) $(LDA_EXT_VVP) $(LDA_IDX_VVP)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-.PHONY: sim sim-irq sim-firq sim-nmi sim-andcc sim-orcc sim-ldd sim-pshu sim-page2 sim-mrdy sim-rti-mrdy sim-irq-async sim-jsr-rts test
+.PHONY: sim sim-irq sim-firq sim-nmi sim-andcc sim-orcc sim-ldd sim-pshu sim-page2 sim-mrdy sim-rti-mrdy sim-irq-async sim-jsr-rts sim-lda-ext sim-lda-idx test
 sim: $(SIM_VVP)
 	vvp $(SIM_VVP)
 sim-irq: $(IRQ_VVP)
@@ -64,6 +68,10 @@ sim-irq-async: $(IRQ_ASYNC_VVP)
 	vvp $(IRQ_ASYNC_VVP)
 sim-jsr-rts: $(JSR_RTS_VVP)
 	vvp $(JSR_RTS_VVP)
+sim-lda-ext: $(LDA_EXT_VVP)
+	vvp $(LDA_EXT_VVP)
+sim-lda-idx: $(LDA_IDX_VVP)
+	vvp $(LDA_IDX_VVP)
 
 test: $(ALL_VVP)
 	@echo "=== sim ===" && vvp $(SIM_VVP)
@@ -79,6 +87,8 @@ test: $(ALL_VVP)
 	@echo "=== sim-rti-mrdy ===" && vvp $(RTI_MRDY_VVP)
 	@echo "=== sim-irq-async ===" && vvp $(IRQ_ASYNC_VVP)
 	@echo "=== sim-jsr-rts ===" && vvp $(JSR_RTS_VVP)
+	@echo "=== sim-lda-ext ===" && vvp $(LDA_EXT_VVP)
+	@echo "=== sim-lda-idx ===" && vvp $(LDA_IDX_VVP)
 	@echo "=== All tests passed ==="
 
 $(SIM_VVP): $(SIM_SRC) | $(BUILD_DIR)
@@ -107,6 +117,10 @@ $(IRQ_ASYNC_VVP): $(IRQ_ASYNC_SRC) | $(BUILD_DIR)
 	iverilog -o $@ $(IRQ_ASYNC_SRC)
 $(JSR_RTS_VVP): $(JSR_RTS_SRC) | $(BUILD_DIR)
 	iverilog -o $@ $(JSR_RTS_SRC)
+$(LDA_EXT_VVP): $(LDA_EXT_SRC) | $(BUILD_DIR)
+	iverilog -o $@ $(LDA_EXT_SRC)
+$(LDA_IDX_VVP): $(LDA_IDX_SRC) | $(BUILD_DIR)
+	iverilog -o $@ $(LDA_IDX_SRC)
 
 .PHONY: clean
 clean:

@@ -37,6 +37,9 @@
 // "IGNORE"- Cause the soft core to merely ignore illegal instructions.  It will consider them 1-byte instructions and
 //           attempt to fetch and run an exception 1 byte later.
 //
+// "SYNC_MEM" - Enable synchronous memory pipeline. When enabled, the core will use MRDY to stall READ_USE until the memory
+//              has had a cycle to respond. This is useful for synchronous memory systems like BRAM.
+//
 
 module mc6809i
 #(

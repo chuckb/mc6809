@@ -53,7 +53,7 @@ reg    rQ = 0;
 assign E = rE;
 assign Q = rQ;
 
-// MRDY routed into core for sync memory; E/Q stretch in this shim is for observability only.
+// MRDY is handled inside the core (stalls READ_USE until MRDY=1). E/Q always run from EXTAL.
 mc6809i cpucore(.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .E(E), .Q(Q), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ),
                 .nNMI(nNMI), .AVMA(AVMA), .BUSY(BUSY), .LIC(LIC), .nHALT(nHALT), .nRESET(nRESET), .nDMABREQ(nDMABREQ),
                 .MRDY(MRDY), .RegData(RegData));
@@ -70,8 +70,7 @@ begin
         2'b11:
             rQ <= 0;
     endcase
-    if (MRDY == 1'b1) 
-        clk_phase <= clk_phase + 2'b01;
+    clk_phase <= clk_phase + 2'b01;
 end
 
 
