@@ -48,8 +48,9 @@ module mc6809i
     output  [7:0]  DOut,
     output  [15:0] ADDR,
     output  RnW,
-    input   E,
-    input   Q,
+    input   CLK_ROOT,
+    input   CE_E_FALL,
+    input   CE_Q_FALL,
     output  BS,
     output  BA,
     input   nIRQ,
@@ -562,83 +563,81 @@ end
 // analyzer on the 6809 to determine how many cycles before a new instruction an interrupt (or /HALT & /DMABREQ)
 // had to be asserted to be noted instead of the next instruction running start to finish.  
 // 
-always @(negedge Q)
+always @(posedge CLK_ROOT)
 begin
-    NMISample <= nNMI;
-    
-    IRQSample <= nIRQ;
-
-    FIRQSample <= nFIRQ;
-
-    HALTSample <= nHALT;
-    
-    DMABREQSample <= nDMABREQ;
-
-        
+    if (CE_Q_FALL) begin
+        NMISample <= nNMI;
+        IRQSample <= nIRQ;
+        FIRQSample <= nFIRQ;
+        HALTSample <= nHALT;
+        DMABREQSample <= nDMABREQ;
+    end
 end
 
 
 reg rnRESET=0; // The latched version of /RESET, useful 1 clock after it's latched
-always @(negedge E)
+always @(posedge CLK_ROOT)
 begin
-    rnRESET <= nRESET;
-    
-    NMISample2 <= NMISample;
-    
-    IRQSample2 <= IRQSample;
-    IRQLatched <= IRQSample2;
-
-    FIRQSample2 <= FIRQSample;
-    FIRQLatched <= FIRQSample2;
-
-    HALTSample2 <= HALTSample;
-    HALTLatched <= HALTSample2;
-
-    DMABREQSample2 <= DMABREQSample;
-    DMABREQLatched <= DMABREQSample2;
-
-
-    if (rnRESET == 1)
-    begin
-        CpuState <= CpuState_nxt;
+    if (CE_E_FALL) begin
+        rnRESET <= nRESET;
         
-        // Don't interpret this next item as "The Next State"; it's a special case 'after this 
-        // generic state, go to this programmable state', so that a single state 
-        // can be shared for many tasks. [Specifically, the stack push/pull code, which is used
-        // for PSH, PUL, Interrupts, RTI, etc.
-        NextState <= NextState_nxt;
-         
-        // CPU registers latch from the combinatorial circuit
-        a <= a_nxt;
-        b <= b_nxt;
-        x <= x_nxt;
-        y <= y_nxt;
-        s <= s_nxt;
-        u <= u_nxt;
-        cc <= cc_nxt;
-        dp <= dp_nxt;
-        pc <= pc_nxt;
-        tmp <= tmp_nxt;
-        addr <= addr_nxt;
-        ea <= ea_nxt;
+        NMISample2 <= NMISample;
         
-        InstPage2 <= InstPage2_nxt;
-        InstPage3 <= InstPage3_nxt;
-        Inst1 <= Inst1_nxt;
-        Inst2 <= Inst2_nxt;
-        Inst3 <= Inst3_nxt;
-        NMIClear <= NMIClear_nxt;
-        
-        IntType <= IntType_nxt;
-        
-        if (s != s_nxt)                 // Once S changes at all (default is '0'), release the NMI Mask.
-            NMIMask <= 1'b0;
-    end
-    else
-    begin
-        CpuState <= CPUSTATE_RESET; 
-        NMIMask <= 1'b1; // Mask NMI until S is loaded.
-        NMIClear <= 1'b0; // Mark us as not having serviced NMI
+        IRQSample2 <= IRQSample;
+        IRQLatched <= IRQSample2;
+
+        FIRQSample2 <= FIRQSample;
+        FIRQLatched <= FIRQSample2;
+
+        HALTSample2 <= HALTSample;
+        HALTLatched <= HALTSample2;
+
+        DMABREQSample2 <= DMABREQSample;
+        DMABREQLatched <= DMABREQSample2;
+
+
+        if (rnRESET == 1)
+        begin
+            CpuState <= CpuState_nxt;
+            
+            // Don't interpret this next item as "The Next State"; it's a special case 'after this 
+            // generic state, go to this programmable state', so that a single state 
+            // can be shared for many tasks. [Specifically, the stack push/pull code, which is used
+            // for PSH, PUL, Interrupts, RTI, etc.
+            NextState <= NextState_nxt;
+            
+            // CPU registers latch from the combinatorial circuit
+            a <= a_nxt;
+            b <= b_nxt;
+            x <= x_nxt;
+            y <= y_nxt;
+            s <= s_nxt;
+            u <= u_nxt;
+            cc <= cc_nxt;
+            dp <= dp_nxt;
+            pc <= pc_nxt;
+            tmp <= tmp_nxt;
+            addr <= addr_nxt;
+            ea <= ea_nxt;
+            
+            InstPage2 <= InstPage2_nxt;
+            InstPage3 <= InstPage3_nxt;
+            Inst1 <= Inst1_nxt;
+            Inst2 <= Inst2_nxt;
+            Inst3 <= Inst3_nxt;
+            NMIClear <= NMIClear_nxt;
+            
+            IntType <= IntType_nxt;
+            
+            if (s != s_nxt)                 // Once S changes at all (default is '0'), release the NMI Mask.
+                NMIMask <= 1'b0;
+        end
+        else
+        begin
+            CpuState <= CPUSTATE_RESET; 
+            NMIMask <= 1'b1; // Mask NMI until S is loaded.
+            NMIClear <= 1'b0; // Mark us as not having serviced NMI
+        end
     end
 end
 
@@ -3632,7 +3631,7 @@ begin
         addr_nxt = 16'HFFFF;
         rAVMA = 1'b1;
         CpuState_nxt = CPUSTATE_PUL_ACTION;
-    end    
+    end
 
     CPUSTATE_PUL_ACTION:
     begin

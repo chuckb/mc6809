@@ -48,33 +48,44 @@ module mc6809s(
     assign  E = rE;
     assign  Q = rQ;
     reg     nCoreRESET;
+    reg     rCE_E_FALL;
+    reg     rCE_Q_FALL;
+    reg [1:0] next_phase;
     
- mc6809i corecpu(.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .E(rE), .Q(rQ), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ), .nNMI(nNMI), .AVMA(AVMA), .BUSY(BUSY), .LIC(LIC), .nRESET(nCoreRESET),
+ mc6809i corecpu(.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .CLK_ROOT(CLK4), .CE_E_FALL(rCE_E_FALL), .CE_Q_FALL(rCE_Q_FALL), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ), .nNMI(nNMI), .AVMA(AVMA), .BUSY(BUSY), .LIC(LIC), .nRESET(nCoreRESET),
                  .nDMABREQ(nDMABREQ), .nHALT(nHALT), .RegData(RegData) );
                  
- always @(posedge CLK4)
+ always @(negedge CLK4)
  begin
-     clk4_cnt <= clk4_cnt+2'b01;
-     
-     if (nRESET == 0)
-     begin
-         clk4_cnt <= 0;
-         nCoreRESET <= 0;
-     end
-     
-     if ( clk4_cnt == 2'b00  )     // RISING EDGE OF E
-         rE <= 1;
-     
-     if (clk4_cnt == 2'b01)        // RISING EDGE OF Q
-        rQ <= 1;     
+     rCE_E_FALL <= 1'b0;
+     rCE_Q_FALL <= 1'b0;
 
-     if (clk4_cnt == 2'b10)        // FALLING EDGE OF E
-        rE <= 0;
-     
-     if (clk4_cnt == 2'b11)        // FALLING EDGE OF Q
+     if (nRESET == 1'b0)
      begin
-        rQ <= 0;
-        nCoreRESET <= 1;
+         clk4_cnt <= 2'b00;
+         rE <= 1'b0;
+         rQ <= 1'b0;
+         nCoreRESET <= 1'b0;
+     end
+     else
+     begin
+         next_phase = clk4_cnt + 2'b01;
+         case (next_phase)
+             2'b00: begin
+                 rE <= 1'b0;
+                 rCE_E_FALL <= 1'b1;
+             end
+             2'b01:
+                 rQ <= 1'b1;
+             2'b10:
+                 rE <= 1'b1;
+             2'b11: begin
+                 rQ <= 1'b0;
+                 rCE_Q_FALL <= 1'b1;
+                 nCoreRESET <= 1'b1;
+             end
+         endcase
+         clk4_cnt <= next_phase;
      end
  end
        

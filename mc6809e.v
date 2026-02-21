@@ -23,8 +23,9 @@ module mc6809e(
     output  [7:0] DOut,
     output  [15:0] ADDR,
     output  RnW,
-    input   E,
-    input   Q,
+    input   CLK_ROOT,
+    input   CE_E_FALL,
+    input   CE_Q_FALL,
     output  BS,
     output  BA,
     input   nIRQ,
@@ -40,7 +41,7 @@ module mc6809e(
 
 
 
-mc6809i cpucore (.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .E(E), .Q(Q), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ), 
+mc6809i cpucore (.D(D), .DOut(DOut), .ADDR(ADDR), .RnW(RnW), .CLK_ROOT(CLK_ROOT), .CE_E_FALL(CE_E_FALL), .CE_Q_FALL(CE_Q_FALL), .BS(BS), .BA(BA), .nIRQ(nIRQ), .nFIRQ(nFIRQ), 
                 .nNMI(nNMI), .AVMA(AVMA), .BUSY(BUSY), .LIC(LIC), .nHALT(nHALT), .nRESET(nRESET), .nDMABREQ(1'b1)
                 );
 
