@@ -3612,8 +3612,10 @@ begin
                 rAVMA = 1'b1;
                 rLIC = 1'b1;
             end
-            else
+            else if (RnWOut)
                 rAVMA = 1'b0;
+            else
+                rAVMA = 1'b1;
             CpuState_nxt  = NextState;
         end                                           
     end
